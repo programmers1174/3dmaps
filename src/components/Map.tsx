@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import mapboxgl from 'mapbox-gl';
+import mapboxgl, { Point } from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 // @ts-ignore
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 
 interface MapProps {
   accessToken: string;
@@ -52,6 +53,7 @@ interface CameraKeyframe {
   position: [number, number, number];
   target: [number, number, number];
   fov: number;
+  direction?: [number, number];
 }
 
 interface Actor {
@@ -113,6 +115,7 @@ const Map: React.FC<MapProps> = ({
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [currentScene, setCurrentScene] = useState<Scene | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPath, setIsRecordingPath] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [showTimeline, setShowTimeline] = useState(false);
@@ -121,6 +124,18 @@ const Map: React.FC<MapProps> = ({
   const [selectedActor, setSelectedActor] = useState<Actor | null>(null);
   const [recordingMediaRecorder, setRecordingMediaRecorder] = useState<MediaRecorder | null>(null);
   const [recordingChunks, setRecordingChunks] = useState<Blob[]>([]);
+  const [cameraPathLayer, setCameraPathLayer] = useState<mapboxgl.Layer | null>(null);
+  const [cameraDirectionLayer, setCameraDirectionLayer] = useState<mapboxgl.Layer | null>(null);
+  const [isEditingPath, setIsEditingPath] = useState(false);
+  const [selectedKeyframe, setSelectedKeyframe] = useState<number | null>(null);
+  const [recordingPoints, setRecordingPoints] = useState<[number, number][]>([]);
+  const [recordingLines, setRecordingLines] = useState<Array<{
+    id: string;
+    start: [number, number];
+    end: [number, number];
+    name: string;
+  }>>([]);
+  const originalSkyPaint = useRef<any>(null);
 
   const mapStyles = [
     { id: 'mapbox://styles/mapbox/streets-v12', name: 'Streets' },
@@ -640,11 +655,18 @@ const Map: React.FC<MapProps> = ({
     const pitch = map.current.getPitch();
     const bearing = map.current.getBearing();
 
+    // Calculate direction vector based on bearing
+    const direction: [number, number] = [
+      Math.cos(THREE.MathUtils.degToRad(bearing)),
+      Math.sin(THREE.MathUtils.degToRad(bearing))
+    ];
+
     const newKeyframe: CameraKeyframe = {
       time: currentTime,
       position: [center.lng, center.lat, zoom],
       target: [center.lng, center.lat, pitch],
-      fov: bearing
+      fov: bearing,
+      direction
     };
 
     setCurrentScene(prev => {
@@ -654,6 +676,8 @@ const Map: React.FC<MapProps> = ({
         cameraPath: [...prev.cameraPath, newKeyframe]
       };
     });
+
+    updateCameraPathVisualization();
   };
 
   // Scene playback functions
@@ -777,6 +801,57 @@ const Map: React.FC<MapProps> = ({
 
     // Start animation
     requestAnimationFrame(animate);
+  };
+
+  // Update camera path visualization
+  const updateCameraPathVisualization = () => {
+    if (!map.current || !currentScene) return;
+
+    const coordinates = currentScene.cameraPath.map(keyframe => keyframe.position);
+    const source = map.current.getSource('camera-path') as mapboxgl.GeoJSONSource;
+    source.setData({
+      type: 'Feature',
+      properties: {},
+      geometry: {
+        type: 'LineString',
+        coordinates
+      }
+    });
+
+    // Update camera direction
+    if (currentScene.cameraPath.length > 0) {
+      const lastKeyframe = currentScene.cameraPath[currentScene.cameraPath.length - 1];
+      const directionSource = map.current.getSource('camera-direction') as mapboxgl.GeoJSONSource;
+      
+      // Create a triangle shape rotated according to the camera's bearing
+      const bearing = lastKeyframe.fov;
+      const size = 20;
+      const center = lastKeyframe.position;
+      
+      // Calculate triangle points based on bearing
+      const points = [
+        [0, 0],
+        [size, size / 2],
+        [0, size]
+      ].map(([x, y]) => {
+        const angle = THREE.MathUtils.degToRad(bearing);
+        const rotatedX = x * Math.cos(angle) - y * Math.sin(angle);
+        const rotatedY = x * Math.sin(angle) + y * Math.cos(angle);
+        return [
+          center[0] + rotatedX * 0.0001, // Scale factor to make it visible on the map
+          center[1] + rotatedY * 0.0001
+        ];
+      });
+
+      directionSource.setData({
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [[...points, points[0]]] // Close the polygon
+        }
+      });
+    }
   };
 
   // Add playback controls to the timeline panel
@@ -1035,6 +1110,267 @@ const Map: React.FC<MapProps> = ({
     </div>
   );
 
+  // Add path editing functionality
+  const startPathEditing = () => {
+    setIsEditingPath(true);
+    if (map.current) {
+      map.current.on('click', handlePathClick);
+      map.current.on('mousemove', handlePathMouseMove);
+    }
+  };
+
+  const stopPathEditing = () => {
+    setIsEditingPath(false);
+    setSelectedKeyframe(null);
+    if (map.current) {
+      map.current.off('click', handlePathClick);
+      map.current.off('mousemove', handlePathMouseMove);
+    }
+  };
+
+  const handlePathClick = (e: mapboxgl.MapMouseEvent) => {
+    if (!currentScene || !map.current) return;
+
+    const point = e.point;
+    const features = map.current.queryRenderedFeatures(point, {
+      layers: ['camera-path']
+    });
+
+    if (features.length > 0) {
+      // Find the closest keyframe
+      const clickedLngLat = e.lngLat;
+      const closestKeyframe = currentScene.cameraPath.reduce((closest, keyframe, index) => {
+        const keyframePoint = map.current!.project([keyframe.position[0], keyframe.position[1]]);
+        const distance = Math.sqrt(
+          Math.pow(keyframePoint.x - point.x, 2) + 
+          Math.pow(keyframePoint.y - point.y, 2)
+        );
+        return distance < closest.distance ? { index, distance } : closest;
+      }, { index: -1, distance: Infinity });
+
+      if (closestKeyframe.index !== -1) {
+        setSelectedKeyframe(closestKeyframe.index);
+      }
+    }
+  };
+
+  const handlePathMouseMove = (e: mapboxgl.MapMouseEvent) => {
+    if (!currentScene || !map.current || selectedKeyframe === null) return;
+
+    const newKeyframe = { ...currentScene.cameraPath[selectedKeyframe] };
+    newKeyframe.position = [e.lngLat.lng, e.lngLat.lat, newKeyframe.position[2]];
+    
+    setCurrentScene(prev => {
+      if (!prev) return prev;
+      const newPath = [...prev.cameraPath];
+      newPath[selectedKeyframe] = newKeyframe;
+      return {
+        ...prev,
+        cameraPath: newPath
+      };
+    });
+
+    updateCameraPathVisualization();
+  };
+
+  // Add these buttons to the film controls
+  const renderPathControls = () => (
+    <div style={{ display: 'flex', gap: '8px' }}>
+      <button
+        onClick={() => isEditingPath ? stopPathEditing() : startPathEditing()}
+        style={{
+          background: isEditingPath ? '#f44336' : '#2196f3',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          padding: '8px 16px',
+          cursor: 'pointer'
+        }}
+      >
+        {isEditingPath ? 'Stop Editing Path' : 'Edit Path'}
+      </button>
+    </div>
+  );
+
+  const lineCreationGuard = useRef(false);
+
+  const handleStartRecording = () => {
+    if (!map.current) return;
+    setRecordingPoints([]);
+    setIsRecordingPath(true);
+    lineCreationGuard.current = false; // Reset guard for new session
+  };
+
+  // Define create3DLine before handleMapClick
+  const create3DLine = (line: { id: string; start: [number, number]; end: [number, number]; name: string }) => {
+    if (!map.current) return;
+    
+    try {
+      console.log('Creating 3D line:', line);
+      
+      // Create a polygon from the line for 3D extrusion
+      const baseWidth = 0.00001; // Base width for the line
+      const lineHeight = 50; // Height of the line in meters
+      
+      // Calculate perpendicular offset for the line
+      const dx = line.end[0] - line.start[0];
+      const dy = line.end[1] - line.start[1];
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const perpX = -dy / length * baseWidth;
+      const perpY = dx / length * baseWidth;
+      
+      // Create polygon coordinates for the line
+      const polygonCoords = [
+        [line.start[0] + perpX, line.start[1] + perpY],
+        [line.start[0] - perpX, line.start[1] - perpY],
+        [line.end[0] - perpX, line.end[1] - perpY],
+        [line.end[0] + perpX, line.end[1] + perpY],
+        [line.start[0] + perpX, line.start[1] + perpY] // Close the polygon
+      ];
+      
+      // Create polygon feature for the line
+      const polygonFeature: GeoJSON.Feature<GeoJSON.Polygon> = {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [polygonCoords]
+        }
+      };
+
+      // Add source for the line
+      map.current.addSource(`recording-path-${line.id}`, {
+        type: 'geojson',
+        data: polygonFeature
+      });
+
+      // Add the 3D line layer
+      map.current.addLayer({
+        id: `recording-path-${line.id}`,
+        type: 'fill-extrusion',
+        source: `recording-path-${line.id}`,
+        paint: {
+          'fill-extrusion-color': '#ff0000',
+          'fill-extrusion-height': lineHeight,
+          'fill-extrusion-base': lineHeight,
+          'fill-extrusion-opacity': 1,
+          'fill-extrusion-vertical-gradient': true
+        }
+      });
+
+      // Helper to create a small square polygon at a point
+      const makeSquare = (center: [number, number], size: number) => {
+        return [
+          [center[0] - size, center[1] - size],
+          [center[0] + size, center[1] - size],
+          [center[0] + size, center[1] + size],
+          [center[0] - size, center[1] + size],
+          [center[0] - size, center[1] - size]
+        ];
+      };
+      const markerSize = 0.00004; // Slightly larger than line width
+
+      // Start endpoint 3D marker
+      const startSquare = makeSquare(line.start, markerSize);
+      map.current.addSource(`recording-path-endpoint-start-${line.id}`, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [startSquare]
+          }
+        }
+      });
+      map.current.addLayer({
+        id: `recording-path-endpoint-start-${line.id}`,
+        type: 'fill-extrusion',
+        source: `recording-path-endpoint-start-${line.id}`,
+        paint: {
+          'fill-extrusion-color': '#0074D9', // Blue
+          'fill-extrusion-height': lineHeight,
+          'fill-extrusion-base': lineHeight,
+          'fill-extrusion-opacity': 1,
+          'fill-extrusion-vertical-gradient': false
+        }
+      });
+
+      // End endpoint 3D marker
+      const endSquare = makeSquare(line.end, markerSize);
+      map.current.addSource(`recording-path-endpoint-end-${line.id}`, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [endSquare]
+          }
+        }
+      });
+      map.current.addLayer({
+        id: `recording-path-endpoint-end-${line.id}`,
+        type: 'fill-extrusion',
+        source: `recording-path-endpoint-end-${line.id}`,
+        paint: {
+          'fill-extrusion-color': '#0074D9', // Blue
+          'fill-extrusion-height': lineHeight,
+          'fill-extrusion-base': lineHeight,
+          'fill-extrusion-opacity': 1,
+          'fill-extrusion-vertical-gradient': false
+        }
+      });
+
+      console.log('Line creation complete');
+    } catch (error) {
+      console.error('Error creating 3D line:', error);
+    }
+  };
+
+  // Memoize handleMapClick so it is stable between renders
+  const handleMapClick = React.useCallback((e: mapboxgl.MapMouseEvent) => {
+    if (!isRecordingPath || !map.current) return;
+    if (lineCreationGuard.current) return; // Prevent double creation
+
+    const coordinates: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+    setRecordingPoints(prev => {
+      const newPoints = [...prev, coordinates];
+      if (newPoints.length === 2) {
+        if (map.current) {
+          lineCreationGuard.current = true; // Set guard before prompt
+          const lineId = `line-${Date.now()}`;
+          const lineName = prompt('What would you like to name this line?') || `Line ${Date.now()}`;
+          const newLine = {
+            id: lineId,
+            start: newPoints[0],
+            end: newPoints[1],
+            name: lineName
+          };
+          create3DLine(newLine);
+          setRecordingPoints([]);
+          setIsRecordingPath(false);
+          map.current.off('click', handleMapClick);
+          setRecordingLines(prev => [...prev, newLine]);
+        }
+      }
+      return newPoints;
+    });
+  }, [isRecordingPath]);
+
+  // Register/unregister the click handler only when isRecordingPath changes
+  useEffect(() => {
+    if (!map.current) return;
+    if (isRecordingPath) {
+      map.current.on('click', handleMapClick);
+    }
+    return () => {
+      if (map.current) {
+        map.current.off('click', handleMapClick);
+      }
+    };
+  }, [isRecordingPath, handleMapClick]);
+
   useEffect(() => {
     if (!mapContainer.current) return;
     console.log("Initializing map with token:", accessToken);
@@ -1069,26 +1405,95 @@ const Map: React.FC<MapProps> = ({
     mapInstance.addControl(drawInstance, 'top-left');
     setDraw(drawInstance);
 
-    // Listen for draw.create event
-    mapInstance.on('draw.create', (e: any) => {
-      setIsDrawing(false);
-      const feature = e.features[0];
-      const id = feature.id || `${Date.now()}-${Math.random()}`;
-      
-      // Ask for building color
-      const buildingColor = prompt('What color should the building be? (e.g., red, blue, #ff0000)') || '#808080';
-      
-      // Then ask for name
-      const buildingName = prompt('What would you like to name this building?') || `Building ${buildings.length + 1}`;
-      
-      setBuildings(prev => [
-        ...prev,
-        { id, feature, height: 50, name: buildingName, color: buildingColor }
-      ]);
-    });
-
-    // Add atmosphere effect for globe view
+    // Wait for the style to load before adding custom layers
     mapInstance.on('style.load', () => {
+      // Add camera path layer
+      mapInstance.addSource('camera-path', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: []
+          }
+        }
+      });
+
+      mapInstance.addLayer({
+        id: 'camera-path',
+        type: 'line',
+        source: 'camera-path',
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round'
+        },
+        paint: {
+          'line-color': '#2196f3',
+          'line-width': 3,
+          'line-opacity': 0.8
+        }
+      });
+
+      // Add camera direction layer
+      mapInstance.addSource('camera-direction', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Point',
+            coordinates: []
+          }
+        }
+      });
+
+      // Create a custom shape for the direction indicator
+      const size = 20;
+      const shape = [
+        [0, 0],
+        [size, size / 2],
+        [0, size]
+      ];
+
+      mapInstance.addLayer({
+        id: 'camera-direction',
+        type: 'fill',
+        source: 'camera-direction',
+        paint: {
+          'fill-color': '#ff0000',
+          'fill-opacity': 0.8
+        },
+        layout: {
+          'visibility': 'visible'
+        }
+      });
+
+      // Add a second layer for the direction indicator outline
+      mapInstance.addLayer({
+        id: 'camera-direction-outline',
+        type: 'line',
+        source: 'camera-direction',
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': 2
+        },
+        layout: {
+          'visibility': 'visible'
+        }
+      });
+
+      setCameraPathLayer(mapInstance.getLayer('camera-path') as mapboxgl.Layer);
+      setCameraDirectionLayer(mapInstance.getLayer('camera-direction') as mapboxgl.Layer);
+
+      // Add atmosphere effect for globe view
+      // Store original sky paint properties and apply atmosphere
+      const skyLayer = mapInstance.getLayer('sky');
+      if (skyLayer) {
+        originalSkyPaint.current = mapInstance.getPaintProperty('sky', 'sky-color' as any);
+        // You might want to store and restore other sky properties like atmosphere
+      }
+
       mapInstance.setFog({
         'color': 'rgb(186, 210, 235)',
         'high-color': 'rgb(36, 92, 223)',
@@ -1122,6 +1527,24 @@ const Map: React.FC<MapProps> = ({
       }, 1000);
     });
 
+    // Listen for draw.create event
+    mapInstance.on('draw.create', (e: any) => {
+      setIsDrawing(false);
+      const feature = e.features[0];
+      const id = feature.id || `${Date.now()}-${Math.random()}`;
+      
+      // Then ask for name
+      const buildingName = prompt('What would you like to name this cloud?') || `Cloud ${buildings.length + 1}`;
+      
+      // Set building color to white (clouds)
+      const buildingColor = '#ffffff';
+      
+      setBuildings(prev => [
+        ...prev,
+        { id, feature, height: 50, name: buildingName, color: buildingColor }
+      ]);
+    });
+
     // Add layer visibility change listener
     mapInstance.on('zoomend', () => {
       const zoom = mapInstance.getZoom();
@@ -1132,11 +1555,72 @@ const Map: React.FC<MapProps> = ({
       }
     });
 
+    // Add a moveend listener to check camera altitude
+    mapInstance.on('moveend', () => {
+      if (!map.current) return;
+
+      const cameraAltitude = map.current.getFreeCameraOptions()?.position?.z;
+      const minBuildingHeight = buildings.reduce((min, b) => Math.min(min, b.height), Infinity);
+
+      const isUnderBuildingArea = typeof cameraAltitude === 'number' && cameraAltitude < minBuildingHeight && buildings.length > 0;
+
+      const skyLayer = map.current.getLayer('sky');
+      if (skyLayer) {
+        if (isUnderBuildingArea) {
+          // Change sky to white
+          map.current.setPaintProperty('sky', 'sky-color' as any, '#ffffff');
+          map.current.setPaintProperty('sky', 'sky-atmosphere-color' as any, '#ffffff');
+          map.current.setPaintProperty('sky', 'sky-atmosphere-gradient' as any, ['interpolate', ['linear'], ['sky-radial-progress'], 0.0, '#ffffff', 1.0, '#ffffff']);
+        } else {
+          // Revert to original sky color
+          if (originalSkyPaint.current) {
+             map.current.setPaintProperty('sky', 'sky-color' as any, originalSkyPaint.current);
+             // You might need to restore other original atmosphere properties here
+             map.current.setPaintProperty('sky', 'sky-atmosphere-color' as any, 'rgb(186, 210, 235)'); // Example: restore a default or stored value
+             map.current.setPaintProperty('sky', 'sky-atmosphere-gradient' as any, [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0,
+              '#1e90ff',
+              0.5,
+              '#87ceeb',
+              1.0,
+              '#ffffff'
+            ]); // Example: restore a default or stored value
+          }
+        }
+      }
+    });
+
+    // Cleanup function
     return () => {
       if (map.current) {
-        map.current.remove();
+        // Clean up all recording path layers and sources
+        recordingLines.forEach(line => {
+          // Clean up line
+          if (map.current?.getLayer(`recording-path-${line.id}`)) {
+            map.current.removeLayer(`recording-path-${line.id}`);
+          }
+          if (map.current?.getSource(`recording-path-${line.id}`)) {
+            map.current.removeSource(`recording-path-${line.id}`);
+          }
+          // Clean up start point
+          if (map.current?.getLayer(`recording-path-start-${line.id}`)) {
+            map.current.removeLayer(`recording-path-start-${line.id}`);
+          }
+          if (map.current?.getSource(`recording-path-start-${line.id}`)) {
+            map.current.removeSource(`recording-path-start-${line.id}`);
+          }
+          // Clean up end point
+          if (map.current?.getLayer(`recording-path-end-${line.id}`)) {
+            map.current.removeLayer(`recording-path-end-${line.id}`);
+          }
+          if (map.current?.getSource(`recording-path-end-${line.id}`)) {
+            map.current.removeSource(`recording-path-end-${line.id}`);
+          }
+        });
       }
-      map.current = null;
     };
   }, [accessToken]);
 
@@ -1178,8 +1662,8 @@ const Map: React.FC<MapProps> = ({
       source: 'custom-cube',
       paint: {
         'fill-extrusion-color': ['get', 'color'],
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-base': 0,
+        'fill-extrusion-base': ['get', 'height'], // Start extrusion at the desired height
+        'fill-extrusion-height': ['+', ['get', 'height'], 50], // Extrude upwards by a fixed thickness (e.g., 50m)
         'fill-extrusion-opacity': 1.0,
         'fill-extrusion-vertical-gradient': true
       }
@@ -1289,379 +1773,310 @@ const Map: React.FC<MapProps> = ({
     };
   }, [models3D]);
 
+  // Add refs for draggable components with proper types
+  const filmControlsRef = useRef<HTMLDivElement>(null);
+  const recordingPathRef = useRef<HTMLDivElement>(null);
+  const timelinePanelRef = useRef<HTMLDivElement>(null);
+  const actorPanelRef = useRef<HTMLDivElement>(null);
+  const effectsPanelRef = useRef<HTMLDivElement>(null);
+  const settingsContainerRef = useRef<HTMLDivElement>(null);
+  const cubeSliderRef = useRef<HTMLDivElement>(null);
+  const sidebarLinesRef = useRef<HTMLDivElement>(null);
+  const importModelButtonRef = useRef<HTMLButtonElement>(null);
+  const modelImportModalRef = useRef<HTMLDivElement>(null);
+  const modelListRef = useRef<HTMLDivElement>(null);
+  const placingModelRef = useRef<HTMLDivElement>(null);
+  const designBuildingButtonRef = useRef<HTMLButtonElement>(null);
+  const buildingsListRef = useRef<HTMLDivElement>(null);
+  const designBuildingContainerRef = useRef<HTMLDivElement>(null);
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
       
       {/* Film-making Controls */}
-      <div className="film-controls" style={{
-        position: 'absolute',
-        bottom: '20px',
-        left: '50%',
-        transform: 'translateX(-50%)',
-        background: 'rgba(0, 0, 0, 0.8)',
-        padding: '16px',
-        borderRadius: '8px',
-        display: 'flex',
-        gap: '12px',
-        zIndex: 1000
-      }}>
-        <button
-          onClick={createNewScene}
-          style={{
-            background: '#2196f3',
+      <Draggable nodeRef={filmControlsRef as React.RefObject<HTMLElement>}>
+        <div ref={filmControlsRef} className="film-controls" style={{
+          position: 'absolute',
+          top: '20px',
+          left: '20px',
+          background: 'rgba(0, 0, 0, 0.8)',
+          padding: '16px',
+          borderRadius: '8px',
+          display: 'flex',
+          gap: '12px',
+          zIndex: 1000
+        }}>
+          <button
+            onClick={handleStartRecording}
+            style={{
+              background: '#2196f3',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              padding: '8px 16px',
+              cursor: 'pointer'
+            }}
+          >
+            Start Recording
+          </button>
+        </div>
+      </Draggable>
+
+      {isRecordingPath && (
+        <Draggable nodeRef={recordingPathRef as React.RefObject<HTMLElement>}>
+          <div ref={recordingPathRef} style={{
+            background: 'rgba(0, 0, 0, 0.8)',
             color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            cursor: 'pointer'
-          }}
-        >
-          New Scene
-        </button>
-        <button
-          onClick={() => setShowTimeline(!showTimeline)}
-          style={{
-            background: '#2196f3',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            cursor: 'pointer'
-          }}
-        >
-          {showTimeline ? 'Hide Timeline' : 'Show Timeline'}
-        </button>
-        <button
-          onClick={() => setShowActorPanel(!showActorPanel)}
-          style={{
-            background: '#4CAF50',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            cursor: 'pointer'
-          }}
-        >
-          {showActorPanel ? 'Hide Actors' : 'Show Actors'}
-        </button>
-        <button
-          onClick={() => setShowEffectsPanel(!showEffectsPanel)}
-          style={{
-            background: '#9C27B0',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            cursor: 'pointer'
-          }}
-        >
-          {showEffectsPanel ? 'Hide Effects' : 'Show Effects'}
-        </button>
-        <button
-          onClick={() => {
-            if (!isRecording) {
-              startRecording();
-            } else {
-              stopRecording();
-            }
-          }}
-          style={{
-            background: isRecording ? '#f44336' : '#2196f3',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            cursor: 'pointer'
-          }}
-        >
-          {isRecording ? 'Stop Recording' : 'Start Recording'}
-        </button>
-      </div>
+            padding: '16px',
+            borderRadius: '8px',
+            zIndex: 1000
+          }}>
+            Click to place {recordingPoints.length === 0 ? 'first' : 'second'} point
+          </div>
+        </Draggable>
+      )}
 
       {/* Timeline Panel */}
-      {showTimeline && renderTimelinePanel()}
+      {showTimeline && (
+        <Draggable nodeRef={timelinePanelRef as React.RefObject<HTMLElement>}>
+          <div ref={timelinePanelRef}>
+            {renderTimelinePanel()}
+          </div>
+        </Draggable>
+      )}
 
       {/* Actor Panel */}
-      {showActorPanel && renderActorPanel()}
+      {showActorPanel && (
+        <Draggable nodeRef={actorPanelRef as React.RefObject<HTMLElement>}>
+          <div ref={actorPanelRef}>
+            {renderActorPanel()}
+          </div>
+        </Draggable>
+      )}
 
       {/* Effects Panel */}
       {showEffectsPanel && (
-        <div className="effects-panel" style={{
-          position: 'absolute',
-          top: '20px',
-          right: '340px',
-          background: 'rgba(0, 0, 0, 0.9)',
-          padding: '16px',
-          borderRadius: '8px',
-          width: '300px',
-          zIndex: 1000
-        }}>
-          <h3 style={{ color: 'white', margin: '0 0 16px 0' }}>Effects</h3>
-          <button
-            onClick={() => {
-              // Add new effect logic
-            }}
-            style={{
-              background: '#9C27B0',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              width: '100%',
-              marginBottom: '16px',
-              cursor: 'pointer'
-            }}
-          >
-            Add Effect
-          </button>
-          <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-            {currentScene?.effects.map(effect => (
-              <div
-                key={effect.id}
-                style={{
-                  background: '#333',
-                  padding: '8px',
-                  borderRadius: '4px',
-                  marginBottom: '8px'
-                }}
-              >
-                <div style={{ color: 'white' }}>{effect.name}</div>
-                <div style={{ color: '#aaa', fontSize: '12px' }}>
-                  Type: {effect.type}
+        <Draggable nodeRef={effectsPanelRef as React.RefObject<HTMLElement>}>
+          <div ref={effectsPanelRef} className="effects-panel" style={{
+            background: 'rgba(0, 0, 0, 0.9)',
+            padding: '16px',
+            borderRadius: '8px',
+            width: '300px',
+            zIndex: 1000
+          }}>
+            <h3 style={{ color: 'white', margin: '0 0 16px 0' }}>Effects</h3>
+            <button
+              onClick={() => {
+                // Add new effect logic
+              }}
+              style={{
+                background: '#9C27B0',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '8px 16px',
+                width: '100%',
+                marginBottom: '16px',
+                cursor: 'pointer'
+              }}
+            >
+              Add Effect
+            </button>
+            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+              {currentScene?.effects.map(effect => (
+                <div
+                  key={effect.id}
+                  style={{
+                    background: '#333',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    marginBottom: '8px'
+                  }}
+                >
+                  <div style={{ color: 'white' }}>{effect.name}</div>
+                  <div style={{ color: '#aaa', fontSize: '12px' }}>
+                    Type: {effect.type}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        </Draggable>
       )}
 
       {/* Settings Button */}
-      <div className="settings-container">
-        <button
-          className="design-building-button"
-          onClick={() => {
-            setIsDrawing(true);
-            if (draw && map.current) {
-              draw.changeMode('draw_polygon');
-            }
-          }}
-          disabled={isDrawing}
-        >
-          Design a building
-        </button>
-        <button 
-          className="settings-button"
-          onClick={() => setShowSettings(!showSettings)}
-        >
-          ⚙️ Settings
-        </button>
-
-        {/* Settings Modal */}
-        {showSettings && (
-          <div className="settings-modal">
-            <div className="settings-section">
-              <h3>Map Style</h3>
-              {mapStyles.map(mapStyle => (
-                <button
-                  key={mapStyle.id}
-                  onClick={() => changeMapStyle(mapStyle.id)}
-                  className={`style-button ${style === mapStyle.id ? 'active' : ''}`}
-                >
-                  {mapStyle.name}
-                </button>
-              ))}
-            </div>
-
-            <div className="settings-section">
-              <h3>3D Features</h3>
-              {layers3D.map(layer => (
-                <button
-                  key={layer.id}
-                  onClick={() => toggle3DLayer(layer.id)}
-                  className={`feature-button ${layer.enabled ? 'active' : ''}`}
-                >
-                  {layer.name}
-                </button>
-              ))}
-            </div>
-
-            <div className="settings-section">
-              <h3>Labels</h3>
-              <button
-                onClick={toggleLabels}
-                className={`feature-button ${showLabels ? 'active' : ''}`}
-              >
-                {showLabels ? 'Hide Labels' : 'Show Labels'}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {buildings.length > 0 && (
-        <div className="cube-slider-container">
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Buildings</div>
-          {buildings.map((b, idx) => (
-            <div key={b.id} style={{ marginBottom: 12, background: selectedBuildingId === b.id ? '#f0f8ff' : 'transparent', padding: 6, borderRadius: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span>
-                  <span style={{ 
-                    display: 'inline-block', 
-                    width: '12px', 
-                    height: '12px', 
-                    backgroundColor: b.color, 
-                    marginRight: '8px',
-                    borderRadius: '2px'
-                  }}></span>
-                  {b.name} Height: {b.height}m
-                </span>
-                <button
-                  style={{ marginLeft: 10, background: '#e53935', color: 'white', border: 'none', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
-                  onClick={() => setBuildings(buildings.filter(x => x.id !== b.id))}
-                >
-                  Delete
-                </button>
-              </div>
-              <input
-                type="range"
-                min={1}
-                max={500}
-                value={b.height}
-                onChange={e => {
-                  const newHeight = Number(e.target.value);
-                  setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
-                }}
-                style={{ width: 200, marginTop: 4 }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Add Model Import Button */}
-      <button
-        className="import-model-button"
-        onClick={() => setShowModelImport(true)}
-        style={{
+      <Draggable nodeRef={settingsContainerRef as React.RefObject<HTMLElement>}>
+        <div ref={settingsContainerRef} className="settings-container" style={{
           position: 'absolute',
           top: '20px',
-          left: '400px',
-          zIndex: 2,
-          background: '#4CAF50',
-          color: 'white',
-          border: 'none',
-          borderRadius: '4px',
-          padding: '8px 16px',
-          fontSize: '16px',
-          cursor: 'pointer'
-        }}
-      >
-        Import 3D Model
-      </button>
-
-      {/* Model Import Modal */}
-      {showModelImport && (
-        <div className="model-import-modal" style={{
-          position: 'absolute',
-          top: '70px',
-          left: '400px',
-          zIndex: 3,
-          background: 'white',
-          padding: '16px',
-          borderRadius: '8px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+          right: '20px',
+          zIndex: 1000
         }}>
-          <h3 style={{ margin: '0 0 16px 0' }}>Import 3D Model</h3>
-          <div style={{ marginBottom: '16px' }}>
-            <label style={{ display: 'block', marginBottom: '8px' }}>Model Scale:</label>
-            <input
-              type="range"
-              min="0.1"
-              max="10"
-              step="0.1"
-              value={modelScale}
-              onChange={(e) => setModelScale(Number(e.target.value))}
-              style={{ width: '200px' }}
-            />
-            <span style={{ marginLeft: '8px' }}>{modelScale}x</span>
-          </div>
-          <div style={{ marginBottom: '16px' }}>
-            <label style={{ display: 'block', marginBottom: '8px' }}>Model Rotation:</label>
-            <input
-              type="range"
-              min="0"
-              max="360"
-              value={modelRotation}
-              onChange={(e) => setModelRotation(Number(e.target.value))}
-              style={{ width: '200px' }}
-            />
-            <span style={{ marginLeft: '8px' }}>{modelRotation}°</span>
-          </div>
-          <button
-            onClick={handleModelImport}
+          <button 
+            className="settings-button"
+            onClick={() => setShowSettings(!showSettings)}
             style={{
-              background: '#4CAF50',
-              color: 'white',
+              background: '#ffffff',
               border: 'none',
               borderRadius: '4px',
               padding: '8px 16px',
+              fontSize: '16px',
               cursor: 'pointer',
-              marginRight: '8px'
+              boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+              transition: 'all 0.2s ease'
             }}
           >
-            Select Model File
+            ⚙️ Settings
           </button>
-          <button
-            onClick={() => setShowModelImport(false)}
-            style={{
-              background: '#f44336',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileSelect}
-            accept=".gltf,.glb"
-            style={{ display: 'none' }}
-          />
+
+          {/* Settings Modal */}
+          {showSettings && (
+            <div className="settings-modal" style={{
+              position: 'absolute',
+              top: '100%',
+              right: '0',
+              marginTop: '8px',
+              background: '#ffffff',
+              borderRadius: '8px',
+              padding: '16px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+              minWidth: '200px'
+            }}>
+              <div className="settings-section">
+                <h3>Map Style</h3>
+                {mapStyles.map(mapStyle => (
+                  <button
+                    key={mapStyle.id}
+                    onClick={() => changeMapStyle(mapStyle.id)}
+                    className={`style-button ${style === mapStyle.id ? 'active' : ''}`}
+                  >
+                    {mapStyle.name}
+                  </button>
+                ))}
+              </div>
+
+              <div className="settings-section">
+                <h3>3D Features</h3>
+                {layers3D.map(layer => (
+                  <button
+                    key={layer.id}
+                    onClick={() => toggle3DLayer(layer.id)}
+                    className={`feature-button ${layer.enabled ? 'active' : ''}`}
+                  >
+                    {layer.name}
+                  </button>
+                ))}
+              </div>
+
+              <div className="settings-section">
+                <h3>Labels</h3>
+                <button
+                  onClick={toggleLabels}
+                  className={`feature-button ${showLabels ? 'active' : ''}`}
+                >
+                  {showLabels ? 'Hide Labels' : 'Show Labels'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+      </Draggable>
+
+      {buildings.length > 0 && (
+        <Draggable nodeRef={cubeSliderRef as React.RefObject<HTMLElement>}>
+          <div ref={cubeSliderRef} className="cube-slider-container">
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Buildings</div>
+            {buildings.map((b, idx) => (
+              <div key={b.id} style={{ marginBottom: 12, background: selectedBuildingId === b.id ? '#f0f8ff' : 'transparent', padding: 6, borderRadius: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>
+                    <span style={{ 
+                      display: 'inline-block', 
+                      width: '12px', 
+                      height: '12px', 
+                      backgroundColor: b.color, 
+                      marginRight: '8px',
+                      borderRadius: '2px'
+                    }}></span>
+                    {b.name} Height: {b.height}m
+                  </span>
+                  <button
+                    style={{ marginLeft: 10, background: '#e53935', color: 'white', border: 'none', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
+                    onClick={() => setBuildings(buildings.filter(x => x.id !== b.id))}
+                  >
+                    Delete
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min={150}
+                  max={700}
+                  value={b.height}
+                  onChange={e => {
+                    const newHeight = Number(e.target.value);
+                    setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
+                  }}
+                  style={{ width: 200, marginTop: 4 }}
+                />
+              </div>
+            ))}
+          </div>
+        </Draggable>
       )}
 
-      {/* Model List */}
-      {models3D.length > 0 && (
-        <div className="model-list" style={{
+      {/* Line List */}
+      <Draggable nodeRef={sidebarLinesRef as React.RefObject<HTMLElement>}>
+        <div ref={sidebarLinesRef} className="sidebar-lines-list" style={{
           position: 'absolute',
-          top: '70px',
-          left: '400px',
-          zIndex: 3,
+          top: '80px',
+          right: '20px',
+          zIndex: 1000,
           background: 'white',
           padding: '16px',
           borderRadius: '8px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-          marginTop: showModelImport ? '200px' : '0'
+          minWidth: '220px',
+          maxWidth: '260px',
         }}>
-          <h3 style={{ margin: '0 0 16px 0' }}>Imported Models</h3>
-          {models3D.map(model => (
-            <div key={model.id} style={{ marginBottom: '12px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{model.name}</span>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Lines</div>
+          {recordingLines.length === 0 && (
+            <div style={{ color: '#888', fontSize: '14px' }}>No lines yet</div>
+          )}
+          {recordingLines.map((line) => (
+            <div key={line.id} style={{ marginBottom: 12, padding: 6, borderRadius: 6, background: '#f7f7f7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>
+                  <span style={{
+                    display: 'inline-block',
+                    width: '12px',
+                    height: '12px',
+                    backgroundColor: '#ff0000',
+                    marginRight: '8px',
+                    borderRadius: '2px'
+                  }}></span>
+                  {line.name}
+                </span>
                 <button
-                  onClick={() => setModels3D(models3D.filter(m => m.id !== model.id))}
                   style={{
-                    background: '#f44336',
+                    marginLeft: 10,
+                    background: '#e53935',
                     color: 'white',
                     border: 'none',
-                    borderRadius: '4px',
-                    padding: '4px 8px',
+                    borderRadius: 4,
+                    padding: '2px 8px',
                     cursor: 'pointer'
+                  }}
+                  onClick={() => {
+                    if (map.current) {
+                      if (map.current.getLayer(`recording-path-${line.id}`)) {
+                        map.current.removeLayer(`recording-path-${line.id}`);
+                      }
+                      if (map.current.getSource(`recording-path-${line.id}`)) {
+                        map.current.removeSource(`recording-path-${line.id}`);
+                      }
+                    }
+                    setRecordingLines(prev => prev.filter(l => l.id !== line.id));
                   }}
                 >
                   Delete
@@ -1670,29 +2085,184 @@ const Map: React.FC<MapProps> = ({
             </div>
           ))}
         </div>
+      </Draggable>
+
+      {/* Buildings List */}
+      {buildings.length > 0 && (
+        <Draggable nodeRef={buildingsListRef as React.RefObject<HTMLElement>}>
+          <div ref={buildingsListRef} className="buildings-list" style={{
+            position: 'absolute',
+            top: '80px',
+            left: '20px',
+            zIndex: 1000,
+            background: 'white',
+            padding: '16px',
+            borderRadius: '8px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+            minWidth: '260px'
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Buildings</div>
+            {buildings.map((b) => (
+              <div key={b.id} style={{ marginBottom: 12, padding: 6, borderRadius: 6, background: '#f7f7f7' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>
+                    <span style={{
+                      display: 'inline-block',
+                      width: '12px',
+                      height: '12px',
+                      backgroundColor: b.color,
+                      marginRight: '8px',
+                      borderRadius: '2px'
+                    }}></span>
+                    {b.name} Height: {b.height}m
+                  </span>
+                  <button
+                    style={{
+                      marginLeft: 10,
+                      background: '#e53935',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 4,
+                      padding: '2px 8px',
+                      cursor: 'pointer'
+                    }}
+                    onClick={() => setBuildings(buildings.filter(x => x.id !== b.id))}
+                  >
+                    Delete
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min={150}
+                  max={700}
+                  value={b.height}
+                  onChange={e => {
+                    const newHeight = Number(e.target.value);
+                    setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
+                  }}
+                  style={{ width: '100%', marginTop: 8 }}
+                />
+              </div>
+            ))}
+          </div>
+        </Draggable>
+      )}
+
+      {/* Add Model Import Button */}
+      <Draggable nodeRef={importModelButtonRef as React.RefObject<HTMLElement>}>
+        <button
+          ref={importModelButtonRef}
+          className="import-model-button"
+          onClick={() => setShowModelImport(true)}
+          style={{
+            position: 'absolute',
+            top: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: '#4CAF50',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            padding: '8px 16px',
+            fontSize: '16px',
+            cursor: 'pointer',
+            zIndex: 1000
+          }}
+        >
+          Import 3D Model
+        </button>
+      </Draggable>
+
+      {/* Design Building Button */}
+      <Draggable nodeRef={designBuildingContainerRef as React.RefObject<HTMLElement>}>
+        <div ref={designBuildingContainerRef} style={{
+          position: 'absolute',
+          top: '80px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 1000
+        }}>
+          <button
+            ref={designBuildingButtonRef}
+            onClick={() => {
+              setIsDrawing(true);
+              if (draw && map.current) {
+                draw.changeMode('draw_polygon');
+              }
+            }}
+            disabled={isDrawing}
+            style={{
+              background: '#2196f3',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              padding: '8px 16px',
+              fontSize: '16px',
+              cursor: isDrawing ? 'not-allowed' : 'pointer',
+              width: 'auto'
+            }}
+          >
+            Make a cloud
+          </button>
+        </div>
+      </Draggable>
+
+      {/* Model List */}
+      {models3D.length > 0 && (
+        <Draggable nodeRef={modelListRef as React.RefObject<HTMLElement>}>
+          <div ref={modelListRef} className="model-list" style={{
+            position: 'absolute',
+            top: '120px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            background: 'white',
+            padding: '16px',
+            borderRadius: '8px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+            marginTop: showModelImport ? '200px' : '0'
+          }}>
+            <h3 style={{ margin: '0 0 16px 0' }}>Imported Models</h3>
+            {models3D.map(model => (
+              <div key={model.id} style={{ marginBottom: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{model.name}</span>
+                  <button
+                    onClick={() => setModels3D(models3D.filter(m => m.id !== model.id))}
+                    style={{
+                      background: '#f44336',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '4px 8px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Draggable>
       )}
 
       {isPlacingModel && (
-        <div style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          background: 'rgba(0, 0, 0, 0.8)',
-          color: 'white',
-          padding: '16px',
-          borderRadius: '8px',
-          zIndex: 1000
-        }}>
-          Draw an area on the map to place the model
-        </div>
+        <Draggable nodeRef={placingModelRef as React.RefObject<HTMLElement>}>
+          <div ref={placingModelRef} style={{
+            background: 'rgba(0, 0, 0, 0.8)',
+            color: 'white',
+            padding: '16px',
+            borderRadius: '8px',
+            zIndex: 1000
+          }}>
+            Draw an area on the map to place the model
+          </div>
+        </Draggable>
       )}
 
       <style>{`
         .settings-container {
-          position: absolute;
-          top: 20px;
-          left: 20px;
           z-index: 1;
         }
 
@@ -1713,9 +2283,6 @@ const Map: React.FC<MapProps> = ({
         }
 
         .settings-modal {
-          position: absolute;
-          top: calc(100% + 10px);
-          left: 0;
           background: #ffffff;
           border-radius: 8px;
           padding: 16px;
@@ -1765,10 +2332,6 @@ const Map: React.FC<MapProps> = ({
         }
 
         .design-building-button {
-          position: absolute;
-          top: 20px;
-          left: 250px;
-          z-index: 2;
           background: #2196f3;
           color: white;
           border: none;
@@ -1783,9 +2346,6 @@ const Map: React.FC<MapProps> = ({
           cursor: not-allowed;
         }
         .cube-slider-container {
-          position: absolute;
-          top: 70px;
-          left: 250px;
           z-index: 3;
           background: white;
           padding: 10px 16px;
@@ -1795,9 +2355,6 @@ const Map: React.FC<MapProps> = ({
           min-width: 260px;
         }
         .import-model-button {
-          position: absolute;
-          top: 20px;
-          left: 400px;
           zIndex: 2;
           background: #4CAF50;
           color: white;
@@ -1808,20 +2365,13 @@ const Map: React.FC<MapProps> = ({
           cursor: pointer;
         }
         .model-import-modal {
-          position: absolute;
-          top: 70px;
-          left: 400px;
-          zIndex: 3;
           background: white;
           padding: 16px;
           borderRadius: 8px;
           boxShadow: 0 2px 8px rgba(0,0,0,0.15);
         }
         .model-list {
-          position: absolute;
-          top: 70px;
-          left: 400px;
-          zIndex: 3;
+          z-index: 3;
           background: white;
           padding: 16px;
           borderRadius: 8px;
