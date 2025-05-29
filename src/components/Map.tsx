@@ -1665,7 +1665,7 @@ const Map: React.FC<MapProps> = ({
         'fill-extrusion-base': ['get', 'height'], // Start extrusion at the desired height
         'fill-extrusion-height': ['+', ['get', 'height'], 50], // Extrude upwards by a fixed thickness (e.g., 50m)
         'fill-extrusion-opacity': 1.0,
-        'fill-extrusion-vertical-gradient': true
+        'fill-extrusion-vertical-gradient': false
       }
     });
 
