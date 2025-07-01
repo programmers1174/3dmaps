@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import mapboxgl, { Point } from 'mapbox-gl';
+import type { Feature, Polygon, GeoJsonProperties } from 'geojson';
 import 'mapbox-gl/dist/mapbox-gl.css';
-// @ts-ignore
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
@@ -23,10 +23,15 @@ interface Layer3D {
 
 interface Building {
   id: string;
-  feature: any;
+  feature: Feature<Polygon, GeoJsonProperties>;
   height: number;
   name: string;
   color: string;
+  position: [number, number];
+  width: number;
+  length: number;
+  isCloud?: boolean;
+  base?: number;
 }
 
 interface Model3D {
@@ -88,7 +93,7 @@ const Map: React.FC<MapProps> = ({
   accessToken,
   initialCoordinates = [-122.4194, 37.7749], // San Francisco
   initialZoom = 15,
-  initialStyle = 'https://api.mapbox.com/styles/v1/adhvikvarshney/cmaa157g800fv01si1xlegcep.html?title=view&access_token=pk.eyJ1IjoiYWRodmlrdmFyc2huZXkiLCJhIjoiY21hYTl4ZjBoMXkwbTJycHp2Nzhia2c2eCJ9.BNlpn1zEm1-G7FBeMPYBUA&zoomwheel=true&fresh=true#14.43/37.79105/-122.40187/31/66' //mapbox://styles/mapbox/streets-v12
+  initialStyle = 'mapbox://styles/mapbox/streets-v12'
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -109,6 +114,7 @@ const Map: React.FC<MapProps> = ({
   const [selectedModelUrl, setSelectedModelUrl] = useState<string>('');
   const [modelScale, setModelScale] = useState(1);
   const [modelRotation, setModelRotation] = useState(0);
+  const [isCloudMode, setIsCloudMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // New state variables for film-making
@@ -137,120 +143,280 @@ const Map: React.FC<MapProps> = ({
   }>>([]);
   const originalSkyPaint = useRef<any>(null);
 
+  const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
+  const [buildingProperties, setBuildingProperties] = useState({
+    name: '',
+    height: 20, // Default height
+    color: '#808080'
+  });
+  const [buildingPosition, setBuildingPosition] = useState<[number, number] | null>(null);
+  const [isCloudNext, setIsCloudNext] = useState(false);
+  const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
+  const [worldBuildingColor, setWorldBuildingColor] = useState('#808080'); // Default gray color for world buildings
+  const [fogEnabled, setFogEnabled] = useState(true);
+
+  // Replace showTopBar with showSidePanel
+  const [showSidePanel, setShowSidePanel] = useState(true);
+
+  const [terrainExaggeration, setTerrainExaggeration] = useState(1);
+  const [buildingReplacements, setBuildingReplacements] = useState<Array<{
+    id: string;
+    buildingName: string;
+    modelUrl: string;
+    position: [number, number];
+    scale: number;
+    rotation: number;
+    originalBuildingId?: string;
+  }>>([]);
+  const [showBuildingReplacement, setShowBuildingReplacement] = useState(false);
+  const [selectedReplacementBuilding, setSelectedReplacementBuilding] = useState<string>('');
+  const [replacementModelUrl, setReplacementModelUrl] = useState<string>('');
+  const [replacementScale, setReplacementScale] = useState(1);
+  const [replacementRotation, setReplacementRotation] = useState(0);
+  const buildingReplacementFileRef = useRef<HTMLInputElement>(null);
+  const [isSelectingBuilding, setIsSelectingBuilding] = useState(false);
+  const [selectedBuildingCoords, setSelectedBuildingCoords] = useState<[number, number] | null>(null);
+  const [selectedBuildingName, setSelectedBuildingName] = useState<string>('');
+
   const mapStyles = [
     { id: 'mapbox://styles/mapbox/streets-v12', name: 'Streets' },
-    { id: 'mapbox://styles/mapbox/satellite-v9', name: 'Satellite' },
-    { id: 'mapbox://styles/mapbox/satellite-streets-v12', name: 'Satellite Streets' },
+    { id: 'mapbox://styles/mapbox/satellite-streets-v12', name: 'Satellite' },
+    { id: 'mapbox://styles/mapbox/satellite-v9', name: 'Satellite (Flat)' },
     { id: 'mapbox://styles/mapbox/dark-v11', name: 'Dark' },
     { id: 'mapbox://styles/mapbox/light-v11', name: 'Light' }
   ];
 
   const toggle3DLayer = (layerId: string) => {
-    setLayers3D(prevLayers =>
-      prevLayers.map(layer =>
-        layer.id === layerId ? { ...layer, enabled: !layer.enabled } : layer
-      )
-    );
+    console.log('Toggling 3D layer:', layerId);
+    try {
+      setLayers3D(prevLayers =>
+        prevLayers.map(layer =>
+          layer.id === layerId ? { ...layer, enabled: !layer.enabled } : layer
+        )
+      );
+      console.log('Updated layers:', layers3D);
+    } catch (error) {
+      console.error('Error toggling 3D layer:', error);
+    }
   };
 
   const toggleLabels = () => {
-    if (!map.current) return;
+    console.log('Toggling labels, current state:', showLabels);
+    if (!map.current) {
+      console.warn('Map not initialized when trying to toggle labels');
+      return;
+    }
     
-    setShowLabels(prev => {
-      const newShowLabels = !prev;
-      const layers = map.current!.getStyle().layers;
-      
-      layers?.forEach(layer => {
-        if (layer.type === 'symbol') {
-          map.current!.setLayoutProperty(
-            layer.id,
-            'visibility',
-            newShowLabels ? 'visible' : 'none'
-          );
-        }
+    try {
+      setShowLabels(prev => {
+        const newShowLabels = !prev;
+        const layers = map.current!.getStyle().layers;
+        console.log('Found layers:', layers?.length);
+        
+        layers?.forEach(layer => {
+          if (layer.type === 'symbol') {
+            console.log('Setting visibility for layer:', layer.id);
+            map.current!.setLayoutProperty(
+              layer.id,
+              'visibility',
+              newShowLabels ? 'visible' : 'none'
+            );
+          }
+        });
+        
+        return newShowLabels;
       });
-      
-      return newShowLabels;
-    });
+    } catch (error) {
+      console.error('Error toggling labels:', error);
+    }
   };
 
   const changeMapStyle = (newStyle: string) => {
-    if (!map.current) return;
-    setStyle(newStyle);
-    
-    // Store current camera position
-    const currentCenter = map.current.getCenter();
-    const currentZoom = map.current.getZoom();
-    const currentPitch = map.current.getPitch();
-    const currentBearing = map.current.getBearing();
-
-    map.current.setStyle(newStyle);
-
-    // Re-add 3D layers after style change and restore camera
-    map.current.once('style.load', () => {
-      // Restore camera position
-      map.current?.setCenter(currentCenter);
-      map.current?.setZoom(currentZoom);
-      map.current?.setPitch(currentPitch);
-      map.current?.setBearing(currentBearing);
-
-      // Re-initialize layers
-      setTimeout(() => {
-        initializeLayers();
-        
-        // Restore label visibility
-        if (!showLabels) {
-          const layers = map.current?.getStyle().layers;
-          layers?.forEach(layer => {
-            if (layer.type === 'symbol') {
-              map.current!.setLayoutProperty(
-                layer.id,
-                'visibility',
-                'none'
-              );
-            }
-          });
-        }
-      }, 1000); // Give time for style to fully load
-    });
-  };
-
-  const initializeLayers = () => {
-    if (!map.current || !map.current.isStyleLoaded()) {
-      setTimeout(initializeLayers, 300); // Try again soon
+    console.log('Changing map style to:', newStyle);
+    if (!map.current) {
+      console.warn('Map not initialized when trying to change style');
       return;
     }
-    const currentMap = map.current;
 
-    // Wait for the 'composite' source (for buildings) and 'mapbox-dem' (for terrain)
-    if (!currentMap.getSource('composite')) {
+    try {
+      setStyle(newStyle);
+      
+      // Store current camera position
+      const currentCenter = map.current.getCenter();
+      const currentZoom = map.current.getZoom();
+      const currentPitch = map.current.getPitch();
+      const currentBearing = map.current.getBearing();
+      console.log('Stored camera position:', { currentCenter, currentZoom, currentPitch, currentBearing });
+
+      // Wait for style to be loaded before making changes
+      map.current.once('style.load', () => {
+        console.log('Style loaded, restoring camera position');
+        // Restore camera position
+        map.current?.setCenter(currentCenter);
+        map.current?.setZoom(currentZoom);
+        map.current?.setPitch(currentPitch);
+        map.current?.setBearing(currentBearing);
+
+        // Set building style based on map style
+        const isSatellite = newStyle.includes('satellite');
+        console.log('Is satellite style:', isSatellite);
+        
+        // Multiple attempts to initialize layers with increasing delays
+        const attemptLayerInitialization = (attempt = 1) => {
+          console.log(`Attempting layer initialization (attempt ${attempt})`);
+          
+          setTimeout(() => {
+            console.log('Re-initializing layers after style change');
+            initializeLayers();
+            
+            // Restore label visibility
+            if (!showLabels && map.current) {
+              try {
+                const layers = map.current.getStyle().layers;
+                console.log('Restoring label visibility, found layers:', layers?.length);
+                layers?.forEach(layer => {
+                  if (layer.type === 'symbol') {
+                    map.current!.setLayoutProperty(
+                      layer.id,
+                      'visibility',
+                      'none'
+                    );
+                  }
+                });
+              } catch (e) {
+                console.error("Error setting label visibility:", e);
+              }
+            }
+
+            // Check if layers were added successfully and retry if needed
+            if (attempt < 3) {
+              setTimeout(() => {
+                const hasBuildings = map.current?.getLayer('3d-buildings') || map.current?.getLayer('3d-buildings-simple');
+                const hasTerrain = map.current?.getLayer('terrain-contours');
+                
+                if (!hasBuildings && layers3D.find(l => l.id === 'buildings')?.enabled) {
+                  console.log(`Buildings not found, retrying (attempt ${attempt + 1})`);
+                  attemptLayerInitialization(attempt + 1);
+                } else if (!hasTerrain && layers3D.find(l => l.id === 'terrain')?.enabled) {
+                  console.log(`Terrain not found, retrying (attempt ${attempt + 1})`);
+                  attemptLayerInitialization(attempt + 1);
+                } else {
+                  console.log('All layers initialized successfully');
+                }
+              }, 2000);
+            }
+          }, attempt * 1000); // Increasing delay for each attempt
+        };
+
+        // Start the initialization process
+        attemptLayerInitialization();
+      });
+
+      map.current.setStyle(newStyle);
+    } catch (error) {
+      console.error('Error changing map style:', error);
+    }
+  };
+
+  const changeWorldBuildingColor = (newColor: string) => {
+    console.log('Changing world building color to:', newColor);
+    setWorldBuildingColor(newColor);
+    
+    // Reinitialize layers to apply the new color
+    if (map.current && map.current.isStyleLoaded()) {
+      setTimeout(() => {
+        initializeLayers();
+      }, 100);
+    }
+  };
+
+  const refresh3DFeatures = () => {
+    console.log('Manually refreshing 3D features');
+    if (map.current && map.current.isStyleLoaded()) {
+      initializeLayers();
+    }
+  };
+
+  const initializeLayers = useCallback(() => {
+    console.log('Initializing layers');
+    if (!map.current) {
+      console.warn('Map not initialized when trying to initialize layers');
       setTimeout(initializeLayers, 300);
       return;
     }
 
-    console.log("Initializing layers, map style:", currentMap.getStyle().name);
+    // Wait for style to be fully loaded
+    if (!map.current.isStyleLoaded()) {
+      console.log('Style not loaded, waiting...');
+      map.current.once('style.load', () => {
+        setTimeout(initializeLayers, 100);
+      });
+      return;
+    }
+
+    const currentMap = map.current;
+    const isSatellite = style.includes('satellite');
+    console.log('Current style:', style, 'Is satellite:', isSatellite);
+
+    // Wait for the 'composite' source (for buildings) and 'mapbox-dem' (for terrain)
+    if (!currentMap.getSource('composite')) {
+      console.log('Composite source not ready, retrying...');
+      setTimeout(initializeLayers, 500);
+      return;
+    }
+
+    try {
+      console.log("Initializing layers, map style:", currentMap.getStyle().name);
+    } catch (e) {
+      console.error("Error getting map style:", e);
+      setTimeout(initializeLayers, 500);
+      return;
+    }
 
     // Clear everything first
     try {
-      if (currentMap.getTerrain()) {
-        currentMap.setTerrain(null);
+      if (
+        currentMap &&
+        currentMap.style &&
+        typeof currentMap.getTerrain === 'function' &&
+        typeof currentMap.getSource === 'function' &&
+        !(currentMap as any)._removed
+      ) {
+        // Always unset terrain before removing the source
+        if (currentMap.getTerrain()) {
+          try {
+            currentMap.setTerrain(null);
+          } catch (e) {
+            console.error('Error unsetting terrain:', e);
+          }
+        }
+        // Remove sources safely
+        ['mapbox-dem', 'satellite'].forEach(sourceId => {
+          if (currentMap.getSource(sourceId)) {
+            try {
+              currentMap.removeSource(sourceId);
+            } catch (e) {
+              console.error(`Error removing source ${sourceId}:`, e);
+            }
+          }
+        });
+        ['sky', '3d-buildings', 'terrain-contours', '3d-buildings-simple', '3d-buildings-fallback'].forEach(layerId => {
+          if (currentMap.getLayer(layerId)) {
+            try {
+              currentMap.removeLayer(layerId);
+            } catch (e) {
+              console.error(`Error removing layer ${layerId}:`, e);
+            }
+          }
+        });
       }
-      ['mapbox-dem', 'satellite'].forEach(sourceId => {
-        if (currentMap.getSource(sourceId)) {
-          currentMap.removeSource(sourceId);
-        }
-      });
-      ['sky', '3d-buildings', 'terrain-contours'].forEach(layerId => {
-        if (currentMap.getLayer(layerId)) {
-          currentMap.removeLayer(layerId);
-        }
-      });
     } catch (e) {
       console.error("Error cleaning up layers:", e);
     }
 
     // Add sky layer first
     try {
+      console.log('Adding sky layer');
       currentMap.addLayer({
         'id': 'sky',
         'type': 'sky',
@@ -278,180 +444,162 @@ const Map: React.FC<MapProps> = ({
       console.error("Error adding sky layer:", e);
     }
 
-    // Add terrain if enabled
-    if (layers3D.find(l => l.id === 'terrain')?.enabled) {
-      console.log("Adding terrain...");
-      try {
-        currentMap.addSource('mapbox-dem', {
-          'type': 'raster-dem',
-          'url': 'mapbox://mapbox.terrain-rgb',
-          'tileSize': 512,
-          'maxzoom': 14
-        });
-
-        currentMap.setTerrain({
-          'source': 'mapbox-dem',
-          'exaggeration': 1.5 // Reduced exaggeration for more realistic look
-        });
-
-        // Add contour lines
-        currentMap.addLayer({
-          'id': 'terrain-contours',
-          'type': 'line',
-          'source': 'mapbox-dem',
-          'source-layer': 'contour',
-          'layout': {
-            'line-join': 'round',
-            'line-cap': 'round'
-          },
-          'paint': {
-            'line-color': '#ffffff',
-            'line-width': 1,
-            'line-opacity': 0.5
+    // Add terrain and buildings with retry logic
+    const addTerrainAndBuildings = () => {
+      // Add terrain
+      if (layers3D.find(l => l.id === 'terrain')?.enabled) {
+        console.log("Adding terrain...");
+        try {
+          if (currentMap.getSource('mapbox-dem')) {
+            currentMap.removeSource('mapbox-dem');
           }
-        });
+          
+          currentMap.addSource('mapbox-dem', {
+            'type': 'raster-dem',
+            'url': 'mapbox://mapbox.terrain-rgb',
+            'tileSize': 512,
+            'maxzoom': 14
+          });
 
-        console.log("Terrain added successfully");
-      } catch (e) {
-        console.error("Error adding terrain:", e);
+          currentMap.setTerrain({
+            'source': 'mapbox-dem',
+            'exaggeration': 1
+          });
+
+          currentMap.addLayer({
+            'id': 'terrain-contours',
+            'type': 'line',
+            'source': 'mapbox-dem',
+            'source-layer': 'contour',
+            'layout': {
+              'line-join': 'round',
+              'line-cap': 'round'
+            },
+            'paint': {
+              'line-color': '#ffffff',
+              'line-width': 1,
+              'line-opacity': 0.5
+            }
+          });
+
+          console.log("Terrain added successfully");
+        } catch (e) {
+          console.error("Error adding terrain:", e);
+          // Retry terrain addition
+          setTimeout(() => {
+            if (layers3D.find(l => l.id === 'terrain')?.enabled) {
+              addTerrainAndBuildings();
+            }
+          }, 1000);
+          return;
+        }
       }
-    }
 
-    // Add 3D buildings if enabled
-    if (layers3D.find(l => l.id === 'buildings')?.enabled) {
-      console.log("Adding 3D buildings...");
-      try {
-        // Add custom building layer with modified settings
-        currentMap.addLayer({
-          'id': '3d-buildings',
-          'source': 'composite',
-          'source-layer': 'building',
-          'filter': ['all',
-            ['==', 'extrude', 'true'],
-            ['has', 'height']
-          ],
-          'type': 'fill-extrusion',
-          'minzoom': 0,
-          'maxzoom': 24,
-          'layout': {
-            'visibility': 'visible'
-          },
-          'paint': {
-            'fill-extrusion-color': [
-              'interpolate',
-              ['linear'],
-              ['get', 'height'],
-              0, '#ffffff',
-              50, '#dad8d8',
-              100, '#b8b8b8',
-              200, '#969696',
-              400, '#747474'
+      // Add 3D buildings
+      if (layers3D.find(l => l.id === 'buildings')?.enabled) {
+        console.log("Adding 3D buildings...");
+        try {
+          // Check if composite source is available
+          if (!currentMap.getSource('composite')) {
+            console.log('Composite source not available, retrying buildings...');
+            setTimeout(addTerrainAndBuildings, 1000);
+            return;
+          }
+
+          // Add the main 3D buildings layer
+          currentMap.addLayer({
+            'id': '3d-buildings',
+            'source': 'composite',
+            'source-layer': 'building',
+            'filter': ['all',
+              ['==', 'extrude', 'true'],
+              ['has', 'height']
             ],
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 1.0,
-            'fill-extrusion-vertical-gradient': true
-          }
-        });
+            'type': 'fill-extrusion',
+            'minzoom': 0,
+            'maxzoom': 24,
+            'layout': {
+              'visibility': 'visible'
+            },
+            'paint': {
+              'fill-extrusion-color': isSatellite ? [
+                'interpolate',
+                ['linear'],
+                ['get', 'height'],
+                0, '#e6e6e6',
+                50, '#d4d4d4',
+                100, '#c2c2c2',
+                200, '#b0b0b0',
+                400, '#9e9e9e'
+              ] : [
+                'interpolate',
+                ['linear'],
+                ['get', 'height'],
+                0, worldBuildingColor,
+                50, worldBuildingColor,
+                100, worldBuildingColor,
+                200, worldBuildingColor,
+                400, worldBuildingColor
+              ],
+              'fill-extrusion-height': ['get', 'height'],
+              'fill-extrusion-base': ['get', 'min_height'],
+              'fill-extrusion-opacity': 1.0,
+              'fill-extrusion-vertical-gradient': true
+            }
+          });
 
-        // Add a simplified building layer for lower zoom levels
-        currentMap.addLayer({
-          'id': '3d-buildings-simple',
-          'source': 'composite',
-          'source-layer': 'building',
-          'filter': ['all',
-            ['==', 'extrude', 'true'],
-            ['has', 'height']
-          ],
-          'type': 'fill-extrusion',
-          'minzoom': 0,
-          'maxzoom': 24,
-          'layout': {
-            'visibility': 'visible'
-          },
-          'paint': {
-            'fill-extrusion-color': '#808080',
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 0.7,
-            'fill-extrusion-vertical-gradient': true
-          }
-        });
+          // Add a simplified building layer for lower zoom levels
+          currentMap.addLayer({
+            'id': '3d-buildings-simple',
+            'source': 'composite',
+            'source-layer': 'building',
+            'filter': ['all',
+              ['==', 'extrude', 'true'],
+              ['has', 'height']
+            ],
+            'type': 'fill-extrusion',
+            'minzoom': 0,
+            'maxzoom': 24,
+            'layout': {
+              'visibility': 'visible'
+            },
+            'paint': {
+              'fill-extrusion-color': isSatellite ? '#d4d4d4' : worldBuildingColor,
+              'fill-extrusion-height': ['get', 'height'],
+              'fill-extrusion-base': ['get', 'min_height'],
+              'fill-extrusion-opacity': 1.0,
+              'fill-extrusion-vertical-gradient': true
+            }
+          });
 
-        // Add a fallback layer for very low zoom levels
-        currentMap.addLayer({
-          'id': '3d-buildings-fallback',
-          'source': 'composite',
-          'source-layer': 'building',
-          'filter': ['all',
-            ['==', 'extrude', 'true'],
-            ['has', 'height']
-          ],
-          'type': 'fill-extrusion',
-          'minzoom': 0,
-          'maxzoom': 24,
-          'layout': {
-            'visibility': 'visible'
-          },
-          'paint': {
-            'fill-extrusion-color': '#a0a0a0',
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 0.5,
-            'fill-extrusion-vertical-gradient': true
-          }
-        });
-
-        console.log("3D buildings added successfully");
-      } catch (e) {
-        console.error("Error adding 3D buildings:", e);
+          console.log("3D buildings added successfully");
+        } catch (e) {
+          console.error("Error adding 3D buildings:", e);
+          // Retry building addition
+          setTimeout(() => {
+            if (layers3D.find(l => l.id === 'buildings')?.enabled) {
+              addTerrainAndBuildings();
+            }
+          }, 1000);
+          return;
+        }
       }
+
+      // Force a repaint
+      currentMap.triggerRepaint();
+    };
+
+    // Start the terrain and building addition process
+    addTerrainAndBuildings();
+  }, [layers3D, style, worldBuildingColor]);
+
+  // Add this useEffect to ensure layers are initialized when the map is ready
+  useEffect(() => {
+    if (map.current && map.current.isStyleLoaded()) {
+      console.log('Map is ready, initializing layers');
+      initializeLayers();
     }
-
-    // Add zoom level change listener
-    currentMap.on('zoom', () => {
-      const zoom = currentMap.getZoom();
-      console.log('Current zoom level:', zoom);
-      
-      // Ensure all building layers stay visible
-      ['3d-buildings', '3d-buildings-simple', '3d-buildings-fallback'].forEach(layerId => {
-        if (currentMap.getLayer(layerId)) {
-          currentMap.setLayoutProperty(layerId, 'visibility', 'visible');
-        }
-      });
-
-      // Adjust layer opacity based on zoom level
-      if (currentMap.getLayer('3d-buildings')) {
-        const opacity = Math.min(1, Math.max(0.3, zoom / 15));
-        currentMap.setPaintProperty('3d-buildings', 'fill-extrusion-opacity', opacity);
-      }
-    });
-
-    // Add a style change listener to reinitialize layers
-    currentMap.on('style.load', () => {
-      // Wait a bit for the style to fully load
-      setTimeout(() => {
-        if (layers3D.find(l => l.id === 'buildings')?.enabled) {
-          initializeLayers();
-        }
-      }, 1000);
-    });
-
-    // Add a moveend listener to ensure layers stay visible after map movement
-    currentMap.on('moveend', () => {
-      ['3d-buildings', '3d-buildings-simple', '3d-buildings-fallback'].forEach(layerId => {
-        if (currentMap.getLayer(layerId)) {
-          currentMap.setLayoutProperty(layerId, 'visibility', 'visible');
-        }
-      });
-    });
-
-    // Remove the zoom change handler as we don't need it anymore
-    currentMap.off('zoom', () => {});
-
-    // Force a repaint
-    currentMap.triggerRepaint();
-  };
+  }, [initializeLayers]);
 
   // Function to handle model import
   const handleModelImport = () => {
@@ -684,7 +832,7 @@ const Map: React.FC<MapProps> = ({
   const playScene = () => {
     if (!currentScene || !map.current) return;
 
-    let startTime = Date.now();
+    const startTime = Date.now();
     const duration = currentScene.duration * 1000; // Convert to milliseconds
     const mapInstance = map.current; // Store reference to avoid null checks
 
@@ -1365,15 +1513,14 @@ const Map: React.FC<MapProps> = ({
       map.current.on('click', handleMapClick);
     }
     return () => {
-      if (map.current) {
+      if (map.current && !(map.current as any)._removed) {
         map.current.off('click', handleMapClick);
       }
     };
   }, [isRecordingPath, handleMapClick]);
 
   useEffect(() => {
-    if (!mapContainer.current) return;
-    console.log("Initializing map with token:", accessToken);
+    if (!mapContainer.current || map.current) return; // Initialize only once
 
     mapboxgl.accessToken = accessToken;
 
@@ -1382,7 +1529,7 @@ const Map: React.FC<MapProps> = ({
       style: 'mapbox://styles/mapbox/satellite-streets-v12',
       center: [-122.431297, 37.773972], // San Francisco downtown
       zoom: 15,
-      pitch: 75,
+      pitch: 40,
       bearing: -30,
       antialias: true,
       maxPitch: 85,
@@ -1494,14 +1641,6 @@ const Map: React.FC<MapProps> = ({
         // You might want to store and restore other sky properties like atmosphere
       }
 
-      mapInstance.setFog({
-        'color': 'rgb(186, 210, 235)',
-        'high-color': 'rgb(36, 92, 223)',
-        'horizon-blend': 0.02,
-        'space-color': 'rgb(11, 11, 25)',
-        'star-intensity': 0.6
-      });
-
       // Hide labels initially since showLabels is false
       const layers = mapInstance.getStyle().layers;
       layers?.forEach(layer => {
@@ -1533,16 +1672,56 @@ const Map: React.FC<MapProps> = ({
       const feature = e.features[0];
       const id = feature.id || `${Date.now()}-${Math.random()}`;
       
-      // Then ask for name
-      const buildingName = prompt('What would you like to name this cloud?') || `Cloud ${buildings.length + 1}`;
+      // Calculate center point of the drawn area
+      const coordinates = feature.geometry.coordinates[0];
+      const center = coordinates.reduce(
+        (acc: [number, number], coord: [number, number]) => [
+          acc[0] + coord[0] / coordinates.length,
+          acc[1] + coord[1] / coordinates.length
+        ],
+        [0, 0]
+      ) as [number, number];
+
+      // Calculate width and length from the polygon
+      const bounds = coordinates.reduce(
+        (acc: { minX: number; maxX: number; minY: number; maxY: number }, coord: [number, number]) => ({
+          minX: Math.min(acc.minX, coord[0]),
+          maxX: Math.max(acc.maxX, coord[0]),
+          minY: Math.min(acc.minY, coord[1]),
+          maxY: Math.max(acc.maxY, coord[1])
+        }),
+        { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+      );
       
-      // Set building color to white (clouds)
-      const buildingColor = '#ffffff';
+      const width = Math.abs(bounds.maxX - bounds.minX);
+      const length = Math.abs(bounds.maxY - bounds.minY);
       
-      setBuildings(prev => [
-        ...prev,
-        { id, feature, height: 50, name: buildingName, color: buildingColor }
-      ]);
+      // Check if we're in cloud creation mode
+      if (isDrawing) {
+        // Then ask for name
+        const buildingName = prompt('What would you like to name this cloud?') || `Cloud ${buildings.length + 1}`;
+        
+        // Set building color to white (clouds)
+        const buildingColor = '#ffffff';
+        
+        setBuildings(prev => [
+          ...prev,
+          {
+            id,
+            feature,
+            height: 50,
+            name: buildingName,
+            color: buildingColor,
+            position: center,
+            width,
+            length
+          }
+        ]);
+        // Delete the drawn polygon
+        if (draw) {
+          draw.delete(feature.id);
+        }
+      }
     });
 
     // Add layer visibility change listener
@@ -1596,33 +1775,29 @@ const Map: React.FC<MapProps> = ({
     // Cleanup function
     return () => {
       if (map.current) {
-        // Clean up all recording path layers and sources
-        recordingLines.forEach(line => {
-          // Clean up line
-          if (map.current?.getLayer(`recording-path-${line.id}`)) {
-            map.current.removeLayer(`recording-path-${line.id}`);
-          }
-          if (map.current?.getSource(`recording-path-${line.id}`)) {
-            map.current.removeSource(`recording-path-${line.id}`);
-          }
-          // Clean up start point
-          if (map.current?.getLayer(`recording-path-start-${line.id}`)) {
-            map.current.removeLayer(`recording-path-start-${line.id}`);
-          }
-          if (map.current?.getSource(`recording-path-start-${line.id}`)) {
-            map.current.removeSource(`recording-path-start-${line.id}`);
-          }
-          // Clean up end point
-          if (map.current?.getLayer(`recording-path-end-${line.id}`)) {
-            map.current.removeLayer(`recording-path-end-${line.id}`);
-          }
-          if (map.current?.getSource(`recording-path-end-${line.id}`)) {
-            map.current.removeSource(`recording-path-end-${line.id}`);
-          }
-        });
+        map.current.remove();
+        map.current = null;
       }
     };
-  }, [accessToken]);
+  }, []);
+
+  // Effect to manage fog based on state
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded() || (map.current as any)._removed) {
+      return;
+    }
+    if (fogEnabled) {
+      map.current.setFog({
+        'color': 'rgba(186,210,235,0.2)',
+        'high-color': 'rgb(36, 92, 223)',
+        'horizon-blend': 0.001,
+        'space-color': 'rgb(11, 11, 25)',
+        'star-intensity': 0.6
+      });
+    } else {
+      map.current.setFog({}); // Disables fog by setting an empty object
+    }
+  }, [fogEnabled, map.current]);
 
   // Reinitialize when 3D settings change
   useEffect(() => {
@@ -1634,144 +1809,422 @@ const Map: React.FC<MapProps> = ({
 
   // Effect to render all buildings as a single GeoJSON source/layer
   useEffect(() => {
-    if (!map.current) return;
+    if (!map.current || !map.current.isStyleLoaded()) return;
 
-    // Remove previous cube layer/source if they exist
-    if (map.current.getLayer('custom-cube')) map.current.removeLayer('custom-cube');
-    if (map.current.getSource('custom-cube')) map.current.removeSource('custom-cube');
-    if (map.current.getLayer('building-icons')) map.current.removeLayer('building-icons');
+    const currentMap = map.current;
+    const buildingSourceId = 'custom-buildings';
+    const cloudSourceId = 'custom-clouds';
 
-    if (buildings.length === 0) return;
+    // Handle buildings
+    if (currentMap.getSource(buildingSourceId)) {
+      if (buildings.filter(b => !b.isCloud).length === 0) {
+        if (currentMap.getLayer(buildingSourceId)) currentMap.removeLayer(buildingSourceId);
+        if (currentMap.getSource(buildingSourceId)) currentMap.removeSource(buildingSourceId);
+      } else {
+        const buildingFeatures = buildings
+          .filter(b => !b.isCloud)
+          .map(b => ({
+            ...b.feature,
+            properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
+          }));
 
-    // Add all buildings as a GeoJSON source
-    map.current.addSource('custom-cube', {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: buildings.map(b => ({
-          ...b.feature,
-          properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
-        }))
+        (currentMap.getSource(buildingSourceId) as mapboxgl.GeoJSONSource).setData({
+          type: 'FeatureCollection',
+          features: buildingFeatures
+        });
       }
-    });
+    } else if (buildings.filter(b => !b.isCloud).length > 0) {
+      currentMap.addSource(buildingSourceId, {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: buildings
+            .filter(b => !b.isCloud)
+            .map(b => ({
+              ...b.feature,
+              properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
+            }))
+        }
+      });
 
-    // Add the fill-extrusion layer with custom colors
-    map.current.addLayer({
-      id: 'custom-cube',
-      type: 'fill-extrusion',
-      source: 'custom-cube',
-      paint: {
-        'fill-extrusion-color': ['get', 'color'],
-        'fill-extrusion-base': ['get', 'height'], // Start extrusion at the desired height
-        'fill-extrusion-height': ['+', ['get', 'height'], 50], // Extrude upwards by a fixed thickness (e.g., 50m)
-        'fill-extrusion-opacity': 1.0,
-        'fill-extrusion-vertical-gradient': false
+      currentMap.addLayer({
+        id: buildingSourceId,
+        type: 'fill-extrusion',
+        source: buildingSourceId,
+        paint: {
+          'fill-extrusion-color': ['get', 'color'],
+          'fill-extrusion-base': 0,
+          'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-opacity': 1.0,
+          'fill-extrusion-vertical-gradient': false
+        }
+      });
+    }
+
+    // Handle clouds separately
+    if (currentMap.getSource(cloudSourceId)) {
+      if (buildings.filter(b => b.isCloud).length === 0) {
+        if (currentMap.getLayer(cloudSourceId)) currentMap.removeLayer(cloudSourceId);
+        if (currentMap.getSource(cloudSourceId)) currentMap.removeSource(cloudSourceId);
+      } else {
+        const cloudFeatures = buildings
+          .filter(b => b.isCloud)
+          .map(b => ({
+            ...b.feature,
+            properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
+          }));
+
+        (currentMap.getSource(cloudSourceId) as mapboxgl.GeoJSONSource).setData({
+          type: 'FeatureCollection',
+          features: cloudFeatures
+        });
       }
-    });
+    } else if (buildings.filter(b => b.isCloud).length > 0) {
+      currentMap.addSource(cloudSourceId, {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: buildings
+            .filter(b => b.isCloud)
+            .map(b => ({
+              ...b.feature,
+              properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
+            }))
+        }
+      });
 
-    // Clean up on unmount or when buildings change
+      currentMap.addLayer({
+        id: cloudSourceId,
+        type: 'fill-extrusion',
+        source: cloudSourceId,
+        paint: {
+          'fill-extrusion-color': ['get', 'color'],
+          'fill-extrusion-base': ['get', 'height'], // Remove bottom face for clouds
+          'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-opacity': 0.8,
+          'fill-extrusion-vertical-gradient': true
+        }
+      });
+    }
+
     return () => {
-      if (map.current?.getLayer('custom-cube')) map.current.removeLayer('custom-cube');
-      if (map.current?.getSource('custom-cube')) map.current.removeSource('custom-cube');
+      const mapInstance = map.current;
+      if (!mapInstance || (mapInstance as any)._removed || !mapInstance.isStyleLoaded()) {
+        return;
+      }
+      try {
+        if (mapInstance.getLayer(buildingSourceId)) {
+          mapInstance.removeLayer(buildingSourceId);
+        }
+      } catch(e) { /* ignore */ }
+      try {
+        if (mapInstance.getSource(buildingSourceId)) {
+          mapInstance.removeSource(buildingSourceId);
+        }
+      } catch(e) { /* ignore */ }
+      try {
+        if (mapInstance.getLayer(cloudSourceId)) {
+          mapInstance.removeLayer(cloudSourceId);
+        }
+      } catch(e) { /* ignore */ }
+      try {
+        if (mapInstance.getSource(cloudSourceId)) {
+          mapInstance.removeSource(cloudSourceId);
+        }
+      } catch(e) { /* ignore */ }
     };
   }, [buildings]);
 
   // Effect to handle 3D models
   useEffect(() => {
-    if (!map.current || models3D.length === 0) return;
+    if (!map.current || !map.current.isStyleLoaded()) return;
 
-    // Create a custom layer for 3D models
-    const customLayer: mapboxgl.CustomLayerInterface = {
-      id: '3d-models',
-      type: 'custom',
-      onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
-        (this as any).camera = new THREE.Camera();
-        (this as any).scene = new THREE.Scene();
-        (this as any).renderer = new THREE.WebGLRenderer({
-          canvas: map.getCanvas(),
-          context: gl,
-          antialias: true
-        });
-        (this as any).renderer.autoClear = false;
-        (this as any).loader = new GLTFLoader();
-        (this as any).models = {};
-        (this as any).map = map;
+    if (map.current.getLayer('custom-clouds-3d')) {
+      map.current.removeLayer('custom-clouds-3d');
+    }
 
-        // Add ambient light
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-        (this as any).scene.add(ambientLight);
+    // Create a custom layer for clouds using Three.js
+    if (buildings.some(b => b.isCloud)) {
+      const clouds = buildings.filter(b => b.isCloud);
+      const customCloudLayer: mapboxgl.CustomLayerInterface = {
+        id: 'custom-clouds-3d',
+        type: 'custom',
+        renderingMode: '3d',
+        onAdd: function(map, gl) {
+          (this as any).map = map;
+          (this as any).camera = new THREE.Camera();
+          (this as any).scene = new THREE.Scene();
+          (this as any).renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl });
+          (this as any).renderer.autoClear = false;
 
-        // Add directional light
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        directionalLight.position.set(0, 1, 0);
-        (this as any).scene.add(directionalLight);
+          // Add ambient and directional light
+          (this as any).scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+          const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+          dirLight.position.set(0, 1, 0);
+          (this as any).scene.add(dirLight);
 
-        // Load all models
-        models3D.forEach(model => {
-          (this as any).loader.load(model.url, (gltf: { scene: THREE.Object3D }) => {
-            const object = gltf.scene;
-            
-            // Center the model
-            const box = new THREE.Box3().setFromObject(object);
-            const center = box.getCenter(new THREE.Vector3());
-            object.position.sub(center);
-
-            // Scale the model
-            const size = box.getSize(new THREE.Vector3());
-            const maxDim = Math.max(size.x, size.y, size.z);
-            const scale = model.scale / maxDim;
-            object.scale.set(scale, scale, scale);
-
-            // Rotate the model
-            object.rotation.y = model.rotation * (Math.PI / 180);
-
-            // Store the model
-            (this as any).models[model.id] = object;
-            (this as any).scene.add(object);
-
-            // Force a repaint
-            map.triggerRepaint();
-          }, 
-          // Progress callback
-          (xhr: any) => {
-            console.log((xhr.loaded / xhr.total * 100) + '% loaded');
-          },
-          // Error callback
-          (error: any) => {
-            console.error('Error loading model:', error);
+          // Add a mesh for each cloud
+          clouds.forEach(cloud => {
+            // Use a box or rounded shape, but remove the bottom face
+            const width = cloud.width * 100000; // scale for visualization
+            const length = cloud.length * 100000;
+            const height = cloud.height;
+            const base = cloud.base ?? 50;
+            const geometry = new THREE.BoxGeometry(width, height, length);
+            geometry.deleteAttribute('uv');
+            geometry.deleteAttribute('normal');
+            geometry.clearGroups();
+            geometry.groups = geometry.groups.filter((g, i) => i !== 4);
+            const materials = [
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: false, opacity: 1 }), // right
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: false, opacity: 1 }), // left
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: false, opacity: 1 }), // top
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: true, opacity: 0 }), // bottom (transparent)
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: false, opacity: 1 }), // front
+              new THREE.MeshStandardMaterial({ color: cloud.color, transparent: false, opacity: 1 })  // back
+            ];
+            const mesh = new THREE.Mesh(geometry, materials);
+            const [lng, lat] = cloud.position;
+            const merc = mapboxgl.MercatorCoordinate.fromLngLat({ lng, lat }, 0);
+            mesh.position.set(merc.x, merc.y, base + height / 2);
+            (this as any).scene.add(mesh);
           });
-        });
-      },
-      render: function(gl: WebGLRenderingContext, matrix: number[]) {
-        const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
-        const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), Math.PI);
-        const m = new THREE.Matrix4().fromArray(matrix).multiply(rotationX).multiply(rotationZ);
-        (this as any).camera.projectionMatrix = m;
-
-        // Update model positions
-        models3D.forEach(model => {
-          const object = (this as any).models[model.id];
-          if (object && (this as any).map) {
-            const position = (this as any).map.project([model.position[0], model.position[1]]);
-            object.position.set(position.x, position.y, 0);
-          }
-        });
-
-        (this as any).renderer.resetState();
-        (this as any).renderer.render((this as any).scene, (this as any).camera);
-        (this as any).map.triggerRepaint();
+        },
+        render: function(gl, matrix) {
+          const m = new THREE.Matrix4().fromArray(matrix);
+          (this as any).camera.projectionMatrix = m;
+          (this as any).renderer.resetState();
+          (this as any).renderer.render((this as any).scene, (this as any).camera);
+          (this as any).map.triggerRepaint();
+        }
+      };
+      if (map.current) {
+         map.current.addLayer(customCloudLayer);
       }
-    };
+    }
 
-    // Add the custom layer
-    map.current.addLayer(customLayer);
+    if (models3D.length > 0) {
+      // Create a custom layer for 3D models
+      const customLayer: mapboxgl.CustomLayerInterface = {
+        id: '3d-models',
+        type: 'custom',
+        onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
+          (this as any).camera = new THREE.Camera();
+          (this as any).scene = new THREE.Scene();
+          (this as any).renderer = new THREE.WebGLRenderer({
+            canvas: map.getCanvas(),
+            context: gl,
+            antialias: true
+          });
+          (this as any).renderer.autoClear = false;
+          (this as any).loader = new GLTFLoader();
+          (this as any).models = {};
+          (this as any).map = map;
+
+          // Add ambient light
+          const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+          (this as any).scene.add(ambientLight);
+
+          // Add directional light
+          const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+          directionalLight.position.set(0, 1, 0);
+          (this as any).scene.add(directionalLight);
+
+          // Load all models
+          models3D.forEach(model => {
+            (this as any).loader.load(model.url, (gltf: { scene: THREE.Object3D }) => {
+              const object = gltf.scene;
+              
+              // Center the model
+              const box = new THREE.Box3().setFromObject(object);
+              const center = box.getCenter(new THREE.Vector3());
+              object.position.sub(center);
+
+              // Scale the model
+              const size = box.getSize(new THREE.Vector3());
+              const maxDim = Math.max(size.x, size.y, size.z);
+              const scale = model.scale / maxDim;
+              object.scale.set(scale, scale, scale);
+
+              // Rotate the model
+              object.rotation.y = model.rotation * (Math.PI / 180);
+
+              // Store the model
+              (this as any).models[model.id] = object;
+              (this as any).scene.add(object);
+
+              // Force a repaint
+              map.triggerRepaint();
+            }, 
+            // Progress callback
+            (xhr: any) => {
+              console.log((xhr.loaded / xhr.total * 100) + '% loaded');
+            },
+            // Error callback
+            (error: any) => {
+              console.error('Error loading model:', error);
+            });
+          });
+        },
+        render: function(gl: WebGLRenderingContext, matrix: number[]) {
+          const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+          const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), Math.PI);
+          const m = new THREE.Matrix4().fromArray(matrix).multiply(rotationX).multiply(rotationZ);
+          (this as any).camera.projectionMatrix = m;
+
+          // Update model positions
+          models3D.forEach(model => {
+            const object = (this as any).models[model.id];
+            if (object && (this as any).map) {
+              const position = (this as any).map.project([model.position[0], model.position[1]]);
+              object.position.set(position.x, position.y, 0);
+            }
+          });
+
+          (this as any).renderer.resetState();
+          (this as any).renderer.render((this as any).scene, (this as any).camera);
+          (this as any).map.triggerRepaint();
+        }
+      };
+
+      // Add the custom layer
+      if (map.current) {
+        if (map.current.getLayer('3d-models')) {
+            map.current.removeLayer('3d-models');
+        }
+        map.current.addLayer(customLayer);
+      }
+    }
+
 
     return () => {
-      if (map.current?.getLayer('3d-models')) {
-        map.current.removeLayer('3d-models');
+      const mapInstance = map.current;
+      if (!mapInstance || (mapInstance as any)._removed || !mapInstance.isStyleLoaded()) {
+        return;
       }
+      try {
+        if (mapInstance.getLayer('custom-clouds-3d')) {
+          mapInstance.removeLayer('custom-clouds-3d');
+        }
+      } catch(e) { /* ignore */ }
+      try {
+        if (mapInstance.getLayer('3d-models')) {
+          mapInstance.removeLayer('3d-models');
+        }
+      } catch(e) { /* ignore */ }
     };
-  }, [models3D]);
+  }, [models3D, buildings]);
+
+  // Effect to handle building replacements
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+
+    if (map.current.getLayer('building-replacements')) {
+      map.current.removeLayer('building-replacements');
+    }
+
+    if (buildingReplacements.length > 0) {
+      // Create a custom layer for building replacements
+      const customLayer: mapboxgl.CustomLayerInterface = {
+        id: 'building-replacements',
+        type: 'custom',
+        onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
+          (this as any).camera = new THREE.Camera();
+          (this as any).scene = new THREE.Scene();
+          (this as any).renderer = new THREE.WebGLRenderer({
+            canvas: map.getCanvas(),
+            context: gl,
+            antialias: true
+          });
+          (this as any).renderer.autoClear = false;
+          (this as any).loader = new GLTFLoader();
+          (this as any).models = {};
+          (this as any).map = map;
+
+          // Add ambient light
+          const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+          (this as any).scene.add(ambientLight);
+
+          // Add directional light
+          const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+          directionalLight.position.set(0, 1, 0);
+          (this as any).scene.add(directionalLight);
+
+          // Load all replacement models
+          buildingReplacements.forEach(replacement => {
+            (this as any).loader.load(replacement.modelUrl, (gltf: { scene: THREE.Object3D }) => {
+              const object = gltf.scene;
+              
+              // Center the model
+              const box = new THREE.Box3().setFromObject(object);
+              const center = box.getCenter(new THREE.Vector3());
+              object.position.sub(center);
+
+              // Scale the model
+              const size = box.getSize(new THREE.Vector3());
+              const maxDim = Math.max(size.x, size.y, size.z);
+              const scale = replacement.scale / maxDim;
+              object.scale.set(scale, scale, scale);
+
+              // Rotate the model
+              object.rotation.y = replacement.rotation * (Math.PI / 180);
+
+              // Store the model
+              (this as any).models[replacement.id] = object;
+              (this as any).scene.add(object);
+
+              // Force a repaint
+              map.triggerRepaint();
+            }, 
+            // Progress callback
+            (xhr: any) => {
+              console.log(`Loading ${replacement.buildingName}: ${(xhr.loaded / xhr.total * 100)}% loaded`);
+            },
+            // Error callback
+            (error: any) => {
+              console.error(`Error loading ${replacement.buildingName}:`, error);
+            });
+          });
+        },
+        render: function(gl: WebGLRenderingContext, matrix: number[]) {
+          const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+          const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), Math.PI);
+          const m = new THREE.Matrix4().fromArray(matrix).multiply(rotationX).multiply(rotationZ);
+          (this as any).camera.projectionMatrix = m;
+
+          // Update model positions
+          buildingReplacements.forEach(replacement => {
+            const object = (this as any).models[replacement.id];
+            if (object && (this as any).map) {
+              const position = (this as any).map.project([replacement.position[0], replacement.position[1]]);
+              object.position.set(position.x, position.y, 0);
+            }
+          });
+
+          (this as any).renderer.resetState();
+          (this as any).renderer.render((this as any).scene, (this as any).camera);
+          (this as any).map.triggerRepaint();
+        }
+      };
+
+      // Add the custom layer
+      if (map.current) {
+        map.current.addLayer(customLayer);
+      }
+    }
+
+    return () => {
+      const mapInstance = map.current;
+      if (!mapInstance || (mapInstance as any)._removed || !mapInstance.isStyleLoaded()) {
+        return;
+      }
+      try {
+        if (mapInstance.getLayer('building-replacements')) {
+          mapInstance.removeLayer('building-replacements');
+        }
+      } catch(e) { /* ignore */ }
+    };
+  }, [buildingReplacements]);
 
   // Add refs for draggable components with proper types
   const filmControlsRef = useRef<HTMLDivElement>(null);
@@ -1782,46 +2235,798 @@ const Map: React.FC<MapProps> = ({
   const settingsContainerRef = useRef<HTMLDivElement>(null);
   const cubeSliderRef = useRef<HTMLDivElement>(null);
   const sidebarLinesRef = useRef<HTMLDivElement>(null);
-  const importModelButtonRef = useRef<HTMLButtonElement>(null);
   const modelImportModalRef = useRef<HTMLDivElement>(null);
   const modelListRef = useRef<HTMLDivElement>(null);
   const placingModelRef = useRef<HTMLDivElement>(null);
   const designBuildingButtonRef = useRef<HTMLButtonElement>(null);
   const buildingsListRef = useRef<HTMLDivElement>(null);
-  const designBuildingContainerRef = useRef<HTMLDivElement>(null);
+  const makeCloudButtonRef = useRef<HTMLButtonElement>(null);
+  const buildingCreationPanelRef = useRef<HTMLDivElement>(null);
+
+  const initializeTerrain = useCallback(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+
+    try {
+      // Remove existing terrain and source
+      if (map.current.getTerrain()) {
+        map.current.setTerrain(null);
+      }
+      if (map.current.getSource('mapbox-dem')) {
+        map.current.removeSource('mapbox-dem');
+      }
+
+      // Add new source and terrain
+      map.current.addSource('mapbox-dem', {
+        'type': 'raster-dem',
+        'url': 'mapbox://mapbox.terrain-rgb',
+        'tileSize': 512,
+        'maxzoom': 14
+      });
+
+      map.current.setTerrain({
+        'source': 'mapbox-dem',
+        'exaggeration': 1
+      });
+    } catch (error) {
+      console.error('Error initializing terrain:', error);
+    }
+  }, []);
+
+  const startBuildingCreation = () => {
+    setIsCreatingBuilding(true);
+    setIsCloudMode(false); // Disable cloud mode
+    
+    // Restore bottom layers when entering building mode
+    if (map.current) {
+      // Restore terrain
+      if (map.current.getLayer('terrain-contours')) {
+        map.current.setLayoutProperty('terrain-contours', 'visibility', 'visible');
+      }
+      // Restore 3D buildings
+      ['3d-buildings', '3d-buildings-simple', '3d-buildings-fallback'].forEach(layerId => {
+        if (map.current?.getLayer(layerId)) {
+          map.current.setLayoutProperty(layerId, 'visibility', 'visible');
+        }
+      });
+      // Reinitialize terrain if enabled
+      if (layers3D.find(l => l.id === 'terrain')?.enabled) {
+        initializeTerrain();
+      }
+    }
+
+    if (map.current && draw) {
+      // Enable polygon drawing mode
+      draw.changeMode('draw_polygon');
+      
+      // Listen for the draw.create event
+      map.current.once('draw.create', (e: any) => {
+        const feature = e.features[0];
+        const coordinates = feature.geometry.coordinates[0];
+        
+        // Calculate center point of the drawn area
+        const center = coordinates.reduce(
+          (acc: [number, number], coord: [number, number]) => [
+            acc[0] + coord[0] / coordinates.length,
+            acc[1] + coord[1] / coordinates.length
+          ],
+          [0, 0]
+        ) as [number, number];
+
+        // Calculate width and length from the polygon
+        const bounds = coordinates.reduce(
+          (acc: { minX: number; maxX: number; minY: number; maxY: number }, coord: [number, number]) => ({
+            minX: Math.min(acc.minX, coord[0]),
+            maxX: Math.max(acc.maxX, coord[0]),
+            minY: Math.min(acc.minY, coord[1]),
+            maxY: Math.max(acc.maxY, coord[1])
+          }),
+          { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
+        );
+        
+        const width = Math.abs(bounds.maxX - bounds.minX);
+        const length = Math.abs(bounds.maxY - bounds.minY);
+
+        // Create a new building
+        const isCloud = isCloudNext;
+        const newBuilding: Building = {
+          id: `building-${Date.now()}`,
+          feature: {
+            type: 'Feature',
+            geometry: {
+              type: 'Polygon',
+              coordinates: [coordinates]
+            },
+            properties: {
+              height: buildingProperties.height,
+              name: buildingProperties.name || (isCloud ? `Cloud ${buildings.length + 1}` : `Building ${buildings.length + 1}`),
+              color: isCloud ? '#ffffff' : buildingProperties.color
+            }
+          },
+          height: buildingProperties.height,
+          name: buildingProperties.name || (isCloud ? `Cloud ${buildings.length + 1}` : `Building ${buildings.length + 1}`),
+          color: isCloud ? '#ffffff' : buildingProperties.color,
+          position: center,
+          width,
+          length,
+          isCloud: isCloud,
+          base: isCloud ? 50 : 0 // <-- add this line
+        };
+
+        // Add the building to the map
+        if (isCloud) {
+          addCloudToMap(newBuilding);
+          hideBottomLayersUnderPolygon(coordinates);
+        } else {
+          addBuildingToMap(newBuilding);
+        }
+        
+        // Delete the drawn polygon
+        draw.delete(feature.id);
+        
+        // Reset building creation state
+        setIsCreatingBuilding(false);
+        setBuildingPosition(null);
+        setIsCloudNext(false);
+      });
+    }
+  };
+
+  const addBuildingToMap = (building: Building) => {
+    if (!map.current) return;
+
+    // Add to buildings state
+    setBuildings(prev => [...prev, building]);
+  };
+
+  // Add new function to handle cloud creation
+  const addCloudToMap = (cloud: Building) => {
+    if (!map.current) return;
+
+    // Add to buildings state with a special property to identify it as a cloud
+    setBuildings(prev => [...prev, { ...cloud, isCloud: true }]);
+
+    // Make sure 3D buildings and terrain are visible
+    if (map.current) {
+      // Ensure terrain is visible
+      if (map.current.getLayer('terrain-contours')) {
+        map.current.setLayoutProperty('terrain-contours', 'visibility', 'visible');
+      }
+      // Ensure 3D buildings are visible
+      ['3d-buildings', '3d-buildings-simple', '3d-buildings-fallback'].forEach(layerId => {
+        if (map.current?.getLayer(layerId)) {
+          map.current.setLayoutProperty(layerId, 'visibility', 'visible');
+        }
+      });
+      // Ensure terrain is initialized if enabled
+      if (layers3D.find(l => l.id === 'terrain')?.enabled) {
+        initializeTerrain();
+      }
+    }
+  };
+
+  // Utility to hide bottom layers under a polygon (cloud)
+  const hideBottomLayersUnderPolygon = (polygonCoords: [number, number][]) => {
+    if (!map.current) return;
+    // Create a GeoJSON mask for the polygon
+    const maskId = `cloud-mask-${Date.now()}`;
+    // Add a source for the mask
+    map.current.addSource(maskId, {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [polygonCoords]
+        },
+        properties: {}
+      }
+    });
+    // Hide terrain and 3D buildings under the mask by adding a fill layer above them
+    map.current.addLayer({
+      id: maskId,
+      type: 'fill',
+      source: maskId,
+      paint: {
+        'fill-color': '#fff',
+        'fill-opacity': 1
+      },
+      layout: {}
+    });
+    // Move the mask above 3d-buildings if it exists
+    if (map.current.getLayer('3d-buildings')) {
+      map.current.moveLayer(maskId, '3d-buildings');
+    }
+  };
+
+  const renderBuildingCreationPanel = () => {
+    const isCloud = isCloudNext;
+    const title = isCloud ? 'Create Cloud' : 'Create Building';
+    const buttonText = isCloud ? 'Start Drawing Cloud' : 'Start Drawing Building';
+    
+    return (
+      <Draggable nodeRef={buildingCreationPanelRef as React.RefObject<HTMLElement>}>
+        <div ref={buildingCreationPanelRef} className="building-creation-panel enhanced-creation-panel" style={{
+          position: 'absolute',
+          top: '20px',
+          right: '20px',
+          background: 'rgba(255,255,255,0.8)',
+          backdropFilter: 'blur(8px)',
+          padding: '28px 24px',
+          borderRadius: '16px',
+          boxShadow: '0 8px 32px rgba(33,150,243,0.12)',
+          zIndex: 1000,
+          cursor: 'move',
+          minWidth: '280px',
+          maxWidth: '350px',
+          fontFamily: 'inherit'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+            <h3 style={{ margin: 0, fontWeight: 700, color: '#1976d2', fontSize: 22, letterSpacing: 1 }}>{title}</h3>
+            <button
+              onClick={() => setShowBuildingCreationPanel(false)}
+              style={{
+                background: 'none',
+                border: 'none',
+                fontSize: '22px',
+                cursor: 'pointer',
+                color: '#666',
+                fontWeight: 700
+              }}
+            >
+              ×
+            </button>
+          </div>
+          <div style={{ marginBottom: '18px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Name:</label>
+            <input
+              type="text"
+              value={buildingProperties.name}
+              onChange={(e) => setBuildingProperties(prev => ({ ...prev, name: e.target.value }))}
+              placeholder={isCloud ? "Enter cloud name" : "Enter building name"}
+              style={{
+                width: '100%',
+                padding: '10px',
+                border: '1.5px solid #b3c6e0',
+                borderRadius: '8px',
+                boxSizing: 'border-box',
+                fontSize: 16,
+                background: '#f7fafd',
+                color: '#222',
+                fontWeight: 500,
+                outline: 'none',
+                marginBottom: 0,
+                transition: 'border 0.2s'
+              }}
+            />
+          </div>
+          <div style={{ marginBottom: '18px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Height (meters):</label>
+            <input
+              type="number"
+              value={buildingProperties.height}
+              onChange={(e) => setBuildingProperties(prev => ({ ...prev, height: Number(e.target.value) }))}
+              min="1"
+              max="1000"
+              style={{
+                width: '100%',
+                padding: '10px',
+                border: '1.5px solid #b3c6e0',
+                borderRadius: '8px',
+                boxSizing: 'border-box',
+                fontSize: 16,
+                background: '#f7fafd',
+                color: '#222',
+                fontWeight: 500,
+                outline: 'none',
+                marginBottom: 0,
+                transition: 'border 0.2s'
+              }}
+            />
+          </div>
+          {!isCloud && (
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Color:</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <input
+                  type="color"
+                  value={buildingProperties.color}
+                  onChange={(e) => setBuildingProperties(prev => ({ ...prev, color: e.target.value }))}
+                  style={{
+                    width: '50px',
+                    height: '40px',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
+                  }}
+                />
+                <span style={{ color: '#666', fontSize: '14px' }}>{buildingProperties.color}</span>
+              </div>
+            </div>
+          )}
+          {isCloud && (
+            <div style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{
+                  width: '50px',
+                  height: '40px',
+                  backgroundColor: '#ffffff',
+                  border: '2px solid #b3c6e0',
+                  borderRadius: '8px'
+                }}></div>
+                <span style={{ color: '#1976d2', fontSize: '14px', fontWeight: 500 }}>Clouds are always white</span>
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => {
+              setShowBuildingCreationPanel(false);
+              // Set default height before starting creation
+              setBuildingProperties(prev => ({ ...prev, height: isCloudNext ? 50 : 20 }));
+              startBuildingCreation();
+            }}
+            style={{
+              backgroundColor: isCloud ? '#2196f3' : '#4CAF50',
+              color: 'white',
+              border: 'none',
+              padding: '14px 0',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              width: '100%',
+              fontSize: '18px',
+              fontWeight: 'bold',
+              boxShadow: '0 2px 8px rgba(33,150,243,0.08)',
+              marginTop: 8,
+              letterSpacing: 1
+            }}
+          >
+            {buttonText}
+          </button>
+          {isCreatingBuilding && (
+            <div style={{ marginTop: '14px', color: '#1976d2', fontSize: '15px', textAlign: 'center', fontWeight: 500 }}>
+              Click on the map to draw the {isCloud ? 'cloud' : 'building'}&apos;s base. Click the first point again to complete the shape.
+            </div>
+          )}
+          <style>{`
+            .enhanced-creation-panel input[type="text"],
+            .enhanced-creation-panel input[type="number"] {
+              box-shadow: 0 2px 8px rgba(33,150,243,0.04);
+            }
+            .enhanced-creation-panel input[type="text"]:focus,
+            .enhanced-creation-panel input[type="number"]:focus {
+              border: 1.5px solid #2196f3;
+              background: #e3f2fd;
+            }
+          `}</style>
+        </div>
+      </Draggable>
+    );
+  };
+
+  // Function to handle building selection for replacement
+  const handleBuildingSelection = () => {
+    if (!map.current) {
+      console.log('❌ Map not available for building selection');
+      return;
+    }
+    
+    console.log('🎯 Starting building selection mode...');
+    setIsSelectingBuilding(true);
+    
+    // Add click handler for building selection
+    const handleClick = (e: mapboxgl.MapMouseEvent) => {
+      if (!isSelectingBuilding) {
+        console.log('❌ Not in selection mode, ignoring click');
+        return;
+      }
+      
+      console.log('🖱️ Click detected at:', e.lngLat.lng, e.lngLat.lat);
+      console.log('📍 Click point:', e.point.x, e.point.y);
+      
+      // Try to find buildings at the clicked point
+      const features = map.current!.queryRenderedFeatures(e.point, {
+        layers: ['3d-buildings', '3d-buildings-simple', '3d-buildings-fallback']
+      });
+      
+      console.log('🏢 Found features:', features.length);
+      features.forEach((feature, index) => {
+        console.log(`  Feature ${index}:`, {
+          layer: feature.layer?.id || 'unknown',
+          type: feature.geometry.type,
+          properties: feature.properties
+        });
+      });
+      
+      let buildingFound = false;
+      
+      if (features.length > 0) {
+        const building = features[0];
+        const coordinates = building.geometry.type === 'Polygon' 
+          ? building.geometry.coordinates[0][0] // Get first point of polygon
+          : [e.lngLat.lng, e.lngLat.lat];
+        
+        console.log('✅ Building found:', {
+          name: building.properties?.name,
+          coordinates: coordinates,
+          geometry: building.geometry.type
+        });
+        
+        setSelectedBuildingCoords([coordinates[0], coordinates[1]]);
+        setSelectedBuildingName(building.properties?.name || `Building at ${coordinates[0].toFixed(4)}, ${coordinates[1].toFixed(4)}`);
+        setSelectedReplacementBuilding(building.properties?.name || `Building at ${coordinates[0].toFixed(4)}, ${coordinates[1].toFixed(4)}`);
+        buildingFound = true;
+      } else {
+        // If no building found, use the clicked coordinates
+        const coordinates = [e.lngLat.lng, e.lngLat.lat];
+        console.log('📍 No building found, using coordinates:', coordinates);
+        
+        setSelectedBuildingCoords([coordinates[0], coordinates[1]]);
+        setSelectedBuildingName(`Location at ${coordinates[0].toFixed(4)}, ${coordinates[1].toFixed(4)}`);
+        setSelectedReplacementBuilding(`Location at ${coordinates[0].toFixed(4)}, ${coordinates[1].toFixed(4)}`);
+        buildingFound = true;
+      }
+      
+      if (buildingFound) {
+        console.log('🎯 Adding marker at:', selectedBuildingCoords);
+        
+        // Show a temporary marker at the selected location
+        if (map.current!.getSource('selected-building-marker')) {
+          console.log('🔄 Updating existing marker');
+          (map.current!.getSource('selected-building-marker') as mapboxgl.GeoJSONSource).setData({
+            type: 'Feature',
+            geometry: {
+              type: 'Point',
+              coordinates: selectedBuildingCoords || [e.lngLat.lng, e.lngLat.lat]
+            },
+            properties: {}
+          });
+        } else {
+          console.log('➕ Creating new marker');
+          map.current!.addSource('selected-building-marker', {
+            type: 'geojson',
+            data: {
+              type: 'Feature',
+              geometry: {
+                type: 'Point',
+                coordinates: selectedBuildingCoords || [e.lngLat.lng, e.lngLat.lat]
+              },
+              properties: {}
+            }
+          });
+          
+          map.current!.addLayer({
+            id: 'selected-building-marker',
+            type: 'circle',
+            source: 'selected-building-marker',
+            paint: {
+              'circle-radius': 12,
+              'circle-color': '#ff0000',
+              'circle-stroke-color': '#ffffff',
+              'circle-stroke-width': 3
+            }
+          });
+        }
+        
+        console.log('✅ Building selection completed');
+        setIsSelectingBuilding(false);
+        map.current!.off('click', handleClick);
+        
+        // Reset cursor
+        if (map.current!.getCanvas()) {
+          map.current!.getCanvas().style.cursor = '';
+        }
+      }
+    };
+    
+    console.log('👂 Adding click listener to map');
+    map.current.on('click', handleClick);
+    
+    // Add visual feedback that selection mode is active
+    if (map.current.getCanvas()) {
+      map.current.getCanvas().style.cursor = 'crosshair';
+      console.log('🎯 Cursor changed to crosshair');
+    }
+    
+    // Add a temporary instruction overlay
+    const instructionDiv = document.createElement('div');
+    instructionDiv.id = 'building-selection-instruction';
+    instructionDiv.style.cssText = `
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      z-index: 10000;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      pointer-events: none;
+    `;
+    instructionDiv.innerHTML = `
+      <div style="font-size: 18px; margin-bottom: 10px;">🎯</div>
+      <div style="font-size: 16px; font-weight: bold;">Click on a building to select it</div>
+      <div style="font-size: 14px; margin-top: 5px;">Or click anywhere to place at coordinates</div>
+    `;
+    document.body.appendChild(instructionDiv);
+    console.log('📋 Instruction overlay added');
+    
+    // Remove instruction after 3 seconds
+    setTimeout(() => {
+      if (document.getElementById('building-selection-instruction')) {
+        document.getElementById('building-selection-instruction')?.remove();
+        console.log('📋 Instruction overlay removed');
+      }
+    }, 3000);
+  };
+
+  // Function to cancel building selection
+  const cancelBuildingSelection = () => {
+    console.log('❌ Cancelling building selection');
+    setIsSelectingBuilding(false);
+    if (map.current) {
+      map.current.getCanvas().style.cursor = '';
+      // Remove the marker
+      if (map.current.getLayer('selected-building-marker')) {
+        map.current.removeLayer('selected-building-marker');
+        console.log('🗑️ Removed marker layer');
+      }
+      if (map.current.getSource('selected-building-marker')) {
+        map.current.removeSource('selected-building-marker');
+        console.log('🗑️ Removed marker source');
+      }
+    }
+    // Remove instruction overlay
+    if (document.getElementById('building-selection-instruction')) {
+      document.getElementById('building-selection-instruction')?.remove();
+      console.log('🗑️ Removed instruction overlay');
+    }
+    setSelectedBuildingCoords(null);
+    setSelectedBuildingName('');
+  };
+
+  // Debug function to list available layers
+  const debugLayers = () => {
+    if (!map.current) {
+      console.log('❌ Map not available');
+      return;
+    }
+    
+    console.log('🔍 Available layers:');
+    const style = map.current.getStyle();
+    if (style && style.layers) {
+      style.layers.forEach((layer, index) => {
+        console.log(`  ${index}: ${layer.id} (${layer.type})`);
+      });
+    }
+  };
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
-      
-      {/* Film-making Controls */}
-      <Draggable nodeRef={filmControlsRef as React.RefObject<HTMLElement>}>
-        <div ref={filmControlsRef} className="film-controls" style={{
-          position: 'absolute',
-          top: '20px',
-          left: '20px',
-          background: 'rgba(0, 0, 0, 0.8)',
-          padding: '16px',
-          borderRadius: '8px',
-          display: 'flex',
-          gap: '12px',
-          zIndex: 1000
-        }}>
+
+      {/* Collapsible Top Bar for Controls */}
+      <div>
+        <div
+          className={`side-panel-glass${showSidePanel ? ' open' : ' closed'}`}
+          style={{
+            position: 'absolute',
+            top: showSidePanel ? 24 : -100,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 'auto',
+            minHeight: 0,
+            zIndex: 1100,
+            background: 'rgba(255,255,255,0.75)',
+            boxShadow: '2px 0 16px rgba(33,150,243,0.10)',
+            borderRadius: '18px',
+            padding: '10px 18px',
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 18,
+            transition: 'top 0.35s cubic-bezier(.4,1.4,.6,1)',
+            backdropFilter: 'blur(10px)',
+            pointerEvents: showSidePanel ? 'auto' : 'none',
+          }}
+        >
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="sidepanel-btn"
+            style={{
+              background: '#fff',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
+            }}
+          >
+            World Layout
+          </button>
+          <button
+            onClick={() => setShowModelImport(true)}
+            className="sidepanel-btn"
+            style={{
+              background: '#fff',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
+            }}
+          >
+            Import 3D Model
+          </button>
+          <button
+            onClick={() => {
+              setIsCloudNext(false);
+              setShowBuildingCreationPanel(true);
+            }}
+            className="sidepanel-btn"
+            style={{
+              background: '#fff',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
+            }}
+          >
+            Design a structure
+          </button>
+          <button
+            onClick={() => {
+              setIsCloudNext(true);
+              setShowBuildingCreationPanel(true);
+            }}
+            className="sidepanel-btn"
+            style={{
+              background: '#fff',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
+            }}
+          >
+            Make a cloud
+          </button>
           <button
             onClick={handleStartRecording}
+            className="sidepanel-btn"
             style={{
-              background: '#2196f3',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              cursor: 'pointer'
+              background: '#fff',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
             }}
           >
             Start Recording
           </button>
+          {/* Toggle button attached to the panel */}
+          <button
+            className="sidepanel-toggle-btn"
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              background: 'rgba(255,255,255,0.92)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+              border: '1px solid #e5e7eb',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontSize: 16,
+              transition: 'background 0.18s',
+              outline: 'none',
+              color: '#1976d2',
+              marginLeft: 8,
+            }}
+            title={showSidePanel ? 'Hide panel' : 'Show panel'}
+            onClick={() => setShowSidePanel(v => !v)}
+          >
+            {showSidePanel ? <span role="img" aria-label="Hide">▲</span> : <span role="img" aria-label="Show">▼</span>}
+          </button>
         </div>
-      </Draggable>
+        {/* Separate toggle button that stays visible when panel is collapsed */}
+        {!showSidePanel && (
+          <button
+            className="sidepanel-toggle-btn"
+            style={{
+              position: 'absolute',
+              top: 24,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              background: 'rgba(255,255,255,0.92)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+              border: '1px solid #e5e7eb',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontSize: 16,
+              transition: 'background 0.18s',
+              outline: 'none',
+              color: '#1976d2',
+              zIndex: 1200,
+            }}
+            title="Show panel"
+            onClick={() => setShowSidePanel(true)}
+          >
+            <span role="img" aria-label="Show">▼</span>
+          </button>
+        )}
+        <style>{`
+          .side-panel-glass.open { pointer-events: auto; }
+          .side-panel-glass.closed { pointer-events: none; }
+          .sidepanel-btn:hover, .sidepanel-btn:focus {
+            background: #f5f6fa;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+            border-color: #d1d5db;
+          }
+          .sidepanel-btn:active {
+            background: #f0f1f3;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+            border-color: #cfd8dc;
+          }
+          .sidepanel-toggle-btn:hover {
+            background: #e3f2fd;
+          }
+        `}</style>
+      </div>
 
       {isRecordingPath && (
         <Draggable nodeRef={recordingPathRef as React.RefObject<HTMLElement>}>
@@ -1905,122 +3110,153 @@ const Map: React.FC<MapProps> = ({
         </Draggable>
       )}
 
+      {/* Building Creation Panel */}
+      {showBuildingCreationPanel && renderBuildingCreationPanel()}
+
       {/* Settings Button */}
-      <Draggable nodeRef={settingsContainerRef as React.RefObject<HTMLElement>}>
-        <div ref={settingsContainerRef} className="settings-container" style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          zIndex: 1000
-        }}>
-          <button 
-            className="settings-button"
-            onClick={() => setShowSettings(!showSettings)}
-            style={{
-              background: '#ffffff',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              fontSize: '16px',
-              cursor: 'pointer',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-              transition: 'all 0.2s ease'
-            }}
-          >
-            ⚙️ Settings
-          </button>
+      <button 
+        className="settings-button"
+        onClick={() => setShowSettings(!showSettings)}
+        style={{
+          background: '#ffffff',
+          border: 'none',
+          borderRadius: '4px',
+          padding: '8px 16px',
+          fontSize: '16px',
+          cursor: 'pointer',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+          transition: 'all 0.2s ease'
+        }}
+      >
+        ⚙️ Settings
+      </button>
 
-          {/* Settings Modal */}
-          {showSettings && (
-            <div className="settings-modal" style={{
-              position: 'absolute',
-              top: '100%',
-              right: '0',
-              marginTop: '8px',
-              background: '#ffffff',
-              borderRadius: '8px',
-              padding: '16px',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-              minWidth: '200px'
-            }}>
-              <div className="settings-section">
-                <h3>Map Style</h3>
-                {mapStyles.map(mapStyle => (
-                  <button
-                    key={mapStyle.id}
-                    onClick={() => changeMapStyle(mapStyle.id)}
-                    className={`style-button ${style === mapStyle.id ? 'active' : ''}`}
-                  >
-                    {mapStyle.name}
-                  </button>
-                ))}
-              </div>
-
-              <div className="settings-section">
-                <h3>3D Features</h3>
-                {layers3D.map(layer => (
-                  <button
-                    key={layer.id}
-                    onClick={() => toggle3DLayer(layer.id)}
-                    className={`feature-button ${layer.enabled ? 'active' : ''}`}
-                  >
-                    {layer.name}
-                  </button>
-                ))}
-              </div>
-
-              <div className="settings-section">
-                <h3>Labels</h3>
-                <button
-                  onClick={toggleLabels}
-                  className={`feature-button ${showLabels ? 'active' : ''}`}
-                >
-                  {showLabels ? 'Hide Labels' : 'Show Labels'}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </Draggable>
 
       {buildings.length > 0 && (
         <Draggable nodeRef={cubeSliderRef as React.RefObject<HTMLElement>}>
-          <div ref={cubeSliderRef} className="cube-slider-container">
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Buildings</div>
+          <div ref={cubeSliderRef} className="cube-slider-container enhanced-cube-slider" style={{
+            position: 'absolute',
+            top: '80px',
+            left: '20px',
+            zIndex: 1000,
+            background: 'rgba(255,255,255,0.7)',
+            backdropFilter: 'blur(8px)',
+            borderRadius: 16,
+            boxShadow: '0 8px 32px rgba(33,150,243,0.12)',
+            padding: 24,
+            minWidth: 280
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 18, color: '#1976d2', letterSpacing: 1 }}>Your Structures</div>
             {buildings.map((b, idx) => (
-              <div key={b.id} style={{ marginBottom: 12, background: selectedBuildingId === b.id ? '#f0f8ff' : 'transparent', padding: 6, borderRadius: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>
-                    <span style={{ 
-                      display: 'inline-block', 
-                      width: '12px', 
-                      height: '12px', 
-                      backgroundColor: b.color, 
-                      marginRight: '8px',
-                      borderRadius: '2px'
-                    }}></span>
-                    {b.name} Height: {b.height}m
+              <div
+                key={b.id}
+                style={{
+                  marginBottom: 16,
+                  background: 'rgba(255,255,255,0.85)',
+                  borderRadius: 12,
+                  boxShadow: selectedBuildingId === b.id
+                    ? '0 4px 16px rgba(33,150,243,0.15)'
+                    : '0 2px 8px rgba(0,0,0,0.08)',
+                  padding: 16,
+                  transition: 'box-shadow 0.2s, background 0.2s',
+                  border: selectedBuildingId === b.id ? '2px solid #2196f3' : '1px solid #eee',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  position: 'relative',
+                  animation: 'fadeInUp 0.5s',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 24, marginRight: 10 }}>
+                    {b.isCloud ? '☁️' : '🏢'}
                   </span>
+                  <span style={{ fontWeight: 600, fontSize: 16, color: '#222' }}>{b.name}</span>
+                  <span style={{
+                    marginLeft: 'auto',
+                    background: b.isCloud ? '#2196f3' : '#FF9800',
+                    color: 'white',
+                    borderRadius: 8,
+                    padding: '2px 10px',
+                    fontSize: 12,
+                    fontWeight: 500
+                  }}>
+                    {b.isCloud ? 'Cloud' : 'Building'}
+                  </span>
+                  <span style={{
+                    marginLeft: 10,
+                    width: 18,
+                    height: 18,
+                    borderRadius: '50%',
+                    background: b.color,
+                    border: '1px solid #ccc',
+                    display: 'inline-block'
+                  }} />
                   <button
-                    style={{ marginLeft: 10, background: '#e53935', color: 'white', border: 'none', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
-                    onClick={() => setBuildings(buildings.filter(x => x.id !== b.id))}
+                    style={{
+                      marginLeft: 10,
+                      background: '#e53935',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '50%',
+                      width: 28,
+                      height: 28,
+                      fontSize: 16,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      transition: 'background 0.2s'
+                    }}
+                    title="Delete"
+                    onClick={() => {
+                      // ...delete logic...
+                      setBuildings(buildings.filter(x => x.id !== b.id));
+                    }}
                   >
-                    Delete
+                    🗑️
                   </button>
                 </div>
-                <input
-                  type="range"
-                  min={150}
-                  max={700}
-                  value={b.height}
-                  onChange={e => {
-                    const newHeight = Number(e.target.value);
-                    setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
-                  }}
-                  style={{ width: 200, marginTop: 4 }}
-                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label style={{ fontSize: 13, color: '#666', marginRight: 4 }}>Height:</label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={700}
+                    value={b.height}
+                    onChange={e => {
+                      const newHeight = Number(e.target.value);
+                      setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
+                    }}
+                    style={{
+                      width: 70,
+                      padding: '6px 8px',
+                      border: '1px solid #bbb',
+                      borderRadius: 6,
+                      fontSize: 15,
+                      background: '#f7fafd',
+                      transition: 'border 0.2s'
+                    }}
+                  />
+                  <span style={{
+                    height: 18,
+                    width: Math.max(18, Math.min(70, b.height / 10)),
+                    background: '#2196f3',
+                    borderRadius: 4,
+                    transition: 'width 0.3s'
+                  }} />
+                  <span style={{ fontSize: 13, color: '#888', marginLeft: 6 }}>{b.height}m</span>
+                </div>
               </div>
             ))}
+            <style>{`
+              @keyframes fadeInUp {
+                from { opacity: 0; transform: translateY(20px);}
+                to { opacity: 1; transform: translateY(0);}
+              }
+              .enhanced-cube-slider > div {
+                animation: fadeInUp 0.5s;
+              }
+            `}</style>
           </div>
         </Draggable>
       )}
@@ -2068,14 +3304,41 @@ const Map: React.FC<MapProps> = ({
                     cursor: 'pointer'
                   }}
                   onClick={() => {
+                    // Remove the line's individual source and layer from the map
                     if (map.current) {
-                      if (map.current.getLayer(`recording-path-${line.id}`)) {
-                        map.current.removeLayer(`recording-path-${line.id}`);
-                      }
-                      if (map.current.getSource(`recording-path-${line.id}`)) {
-                        map.current.removeSource(`recording-path-${line.id}`);
+                      try {
+                        if (
+                          map.current &&
+                          map.current.style &&
+                          typeof map.current.getLayer === 'function' &&
+                          typeof map.current.getSource === 'function' &&
+                          !(map.current as any)._removed
+                        ) {
+                          const mapInstance = map.current!;
+                          if (mapInstance.getLayer(`recording-path-${line.id}`)) {
+                            try { mapInstance.removeLayer(`recording-path-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                          if (mapInstance.getSource(`recording-path-${line.id}`)) {
+                            try { mapInstance.removeSource(`recording-path-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                          if (mapInstance.getLayer(`recording-path-endpoint-start-${line.id}`)) {
+                            try { mapInstance.removeLayer(`recording-path-endpoint-start-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                          if (mapInstance.getSource(`recording-path-endpoint-start-${line.id}`)) {
+                            try { mapInstance.removeSource(`recording-path-endpoint-start-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                          if (mapInstance.getLayer(`recording-path-endpoint-end-${line.id}`)) {
+                            try { mapInstance.removeLayer(`recording-path-endpoint-end-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                          if (mapInstance.getSource(`recording-path-endpoint-end-${line.id}`)) {
+                            try { mapInstance.removeSource(`recording-path-endpoint-end-${line.id}`); } catch (e) { console.error(e); }
+                          }
+                        }
+                      } catch (e) {
+                        console.error('Error in line deletion cleanup:', e);
                       }
                     }
+                    // Remove the line from the state
                     setRecordingLines(prev => prev.filter(l => l.id !== line.id));
                   }}
                 >
@@ -2084,126 +3347,6 @@ const Map: React.FC<MapProps> = ({
               </div>
             </div>
           ))}
-        </div>
-      </Draggable>
-
-      {/* Buildings List */}
-      {buildings.length > 0 && (
-        <Draggable nodeRef={buildingsListRef as React.RefObject<HTMLElement>}>
-          <div ref={buildingsListRef} className="buildings-list" style={{
-            position: 'absolute',
-            top: '80px',
-            left: '20px',
-            zIndex: 1000,
-            background: 'white',
-            padding: '16px',
-            borderRadius: '8px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-            minWidth: '260px'
-          }}>
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Buildings</div>
-            {buildings.map((b) => (
-              <div key={b.id} style={{ marginBottom: 12, padding: 6, borderRadius: 6, background: '#f7f7f7' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>
-                    <span style={{
-                      display: 'inline-block',
-                      width: '12px',
-                      height: '12px',
-                      backgroundColor: b.color,
-                      marginRight: '8px',
-                      borderRadius: '2px'
-                    }}></span>
-                    {b.name} Height: {b.height}m
-                  </span>
-                  <button
-                    style={{
-                      marginLeft: 10,
-                      background: '#e53935',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: 4,
-                      padding: '2px 8px',
-                      cursor: 'pointer'
-                    }}
-                    onClick={() => setBuildings(buildings.filter(x => x.id !== b.id))}
-                  >
-                    Delete
-                  </button>
-                </div>
-                <input
-                  type="range"
-                  min={150}
-                  max={700}
-                  value={b.height}
-                  onChange={e => {
-                    const newHeight = Number(e.target.value);
-                    setBuildings(buildings.map(x => x.id === b.id ? { ...x, height: newHeight } : x));
-                  }}
-                  style={{ width: '100%', marginTop: 8 }}
-                />
-              </div>
-            ))}
-          </div>
-        </Draggable>
-      )}
-
-      {/* Add Model Import Button */}
-      <Draggable nodeRef={importModelButtonRef as React.RefObject<HTMLElement>}>
-        <button
-          ref={importModelButtonRef}
-          className="import-model-button"
-          onClick={() => setShowModelImport(true)}
-          style={{
-            position: 'absolute',
-            top: '20px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: '#4CAF50',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            padding: '8px 16px',
-            fontSize: '16px',
-            cursor: 'pointer',
-            zIndex: 1000
-          }}
-        >
-          Import 3D Model
-        </button>
-      </Draggable>
-
-      {/* Design Building Button */}
-      <Draggable nodeRef={designBuildingContainerRef as React.RefObject<HTMLElement>}>
-        <div ref={designBuildingContainerRef} style={{
-          position: 'absolute',
-          top: '80px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 1000
-        }}>
-          <button
-            ref={designBuildingButtonRef}
-            onClick={() => {
-              setIsDrawing(true);
-              if (draw && map.current) {
-                draw.changeMode('draw_polygon');
-              }
-            }}
-            disabled={isDrawing}
-            style={{
-              background: '#2196f3',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              fontSize: '16px',
-              cursor: isDrawing ? 'not-allowed' : 'pointer',
-              width: 'auto'
-            }}
-          >
-            Make a cloud
-          </button>
         </div>
       </Draggable>
 
@@ -2260,7 +3403,6 @@ const Map: React.FC<MapProps> = ({
           </div>
         </Draggable>
       )}
-
       <style>{`
         .settings-container {
           z-index: 1;
@@ -2398,6 +3540,414 @@ const Map: React.FC<MapProps> = ({
           box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
         }
       `}</style>
+      {showSettings && (
+        <Draggable nodeRef={settingsContainerRef as React.RefObject<HTMLElement>}>
+          <div ref={settingsContainerRef} className="settings-panel" style={{
+            position: 'absolute',
+            top: '80px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'white',
+            padding: '20px',
+            borderRadius: '8px',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+            zIndex: 1000,
+            minWidth: '250px',
+            maxHeight: '70vh',
+            overflowY: 'auto'
+          }}>
+            <h3 style={{ margin: '0 0 16px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>World Layout</span>
+              <button
+                onClick={() => setShowSettings(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: 22,
+                  color: '#888',
+                  cursor: 'pointer',
+                  borderRadius: 6,
+                  padding: 4,
+                  marginLeft: 12,
+                  transition: 'background 0.15s',
+                  lineHeight: 1
+                }}
+                title="Close"
+              >
+                ×
+              </button>
+            </h3>
+            <div style={{ marginBottom: '20px' }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Map Style</h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {mapStyles.map(mapStyle => (
+                  <button
+                    key={mapStyle.id}
+                    onClick={() => changeMapStyle(mapStyle.id)}
+                    style={{
+                      padding: '8px 12px',
+                      border: '1px solid #e0e0e0',
+                      borderRadius: '4px',
+                      background: style === mapStyle.id ? '#2196f3' : '#ffffff',
+                      color: style === mapStyle.id ? '#ffffff' : '#333',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    {mapStyle.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: '20px' }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>3D Features</h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {layers3D.map(layer => (
+                  <button
+                    key={layer.id}
+                    onClick={() => toggle3DLayer(layer.id)}
+                    style={{
+                      padding: '8px 12px',
+                      border: '1px solid #e0e0e0',
+                      borderRadius: '4px',
+                      background: layer.enabled ? '#2196f3' : '#ffffff',
+                      color: layer.enabled ? '#ffffff' : '#333',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    {layer.name}
+                  </button>
+                ))}
+                <button
+                  onClick={refresh3DFeatures}
+                  style={{
+                    padding: '8px 12px',
+                    border: '1px solid #e0e0e0',
+                    borderRadius: '4px',
+                    background: '#4CAF50',
+                    color: '#ffffff',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.2s ease',
+                    fontSize: '12px'
+                  }}
+                >
+                  🔄 Refresh 3D Features
+                </button>
+              </div>
+            </div>
+            <div>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Labels</h4>
+              <button
+                onClick={toggleLabels}
+                style={{
+                  padding: '8px 12px',
+                  border: '1px solid #e0e0e0',
+                  borderRadius: '4px',
+                  background: showLabels ? '#2196f3' : '#ffffff',
+                  color: showLabels ? '#ffffff' : '#333',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  transition: 'all 0.2s ease',
+                  width: '100%'
+                }}
+              >
+                {showLabels ? 'Hide Labels' : 'Show Labels'}
+              </button>
+            </div>
+            <div style={{ marginTop: '20px' }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>World Building Color</h4>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <input
+                  type="color"
+                  value={worldBuildingColor}
+                  onChange={(e) => changeWorldBuildingColor(e.target.value)}
+                  style={{ 
+                    width: '50px', 
+                    height: '40px', 
+                    border: 'none', 
+                    borderRadius: '4px',
+                    cursor: 'pointer'
+                  }}
+                />
+                <span style={{ color: '#666', fontSize: '14px' }}>{worldBuildingColor}</span>
+              </div>
+              <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
+                Change the color of all 3D buildings in the world
+              </div>
+            </div>
+            <div style={{ marginTop: '20px' }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Terrain Exaggeration</h4>
+              <input
+                type="range"
+                min={0.1}
+                max={3}
+                step={0.01}
+                value={terrainExaggeration}
+                onChange={e => {
+                  const value = parseFloat(e.target.value);
+                  setTerrainExaggeration(value);
+                  if (map.current && map.current.getTerrain()) {
+                    map.current.setTerrain({
+                      source: 'mapbox-dem',
+                      exaggeration: value
+                    });
+                  }
+                }}
+                style={{ width: '100%' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#888' }}>
+                <span>0.1x</span>
+                <span>{terrainExaggeration.toFixed(2)}x</span>
+                <span>3x</span>
+              </div>
+            </div>
+
+            {/* Building Replacements Section */}
+            <div style={{ marginBottom: '20px', borderTop: '1px solid #e0e0e0', paddingTop: '16px' }}>
+              <h4 style={{ margin: '0 0 12px 0', color: '#333' }}>Building Replacements</h4>
+              <p style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+                Replace specific buildings with custom 3D models
+              </p>
+              
+              <button
+                onClick={() => setShowBuildingReplacement(!showBuildingReplacement)}
+                style={{
+                  background: '#f0f0f0',
+                  border: '1px solid #ccc',
+                  borderRadius: '4px',
+                  padding: '8px 12px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  marginBottom: '12px'
+                }}
+              >
+                {showBuildingReplacement ? 'Hide' : 'Add'} Building Replacement
+              </button>
+
+              <button
+                onClick={debugLayers}
+                style={{
+                  background: '#ffc107',
+                  border: '1px solid #e0a800',
+                  borderRadius: '4px',
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  marginBottom: '12px',
+                  marginLeft: '8px'
+                }}
+                title="Debug: List available layers in console"
+              >
+                🐛 Debug Layers
+              </button>
+
+              {showBuildingReplacement && (
+                <div style={{ 
+                  background: '#f9f9f9', 
+                  padding: '12px', 
+                  borderRadius: '4px',
+                  marginBottom: '12px'
+                }}>
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
+                      Building Name (e.g., &quot;Transamerica Pyramid&quot;):
+                    </label>
+                    <input
+                      type="text"
+                      value={selectedReplacementBuilding}
+                      onChange={(e) => setSelectedReplacementBuilding(e.target.value)}
+                      placeholder="Enter building name"
+                      style={{
+                        width: '100%',
+                        padding: '6px',
+                        border: '1px solid #ccc',
+                        borderRadius: '3px',
+                        fontSize: '12px'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '8px' }}>
+                    <button
+                      onClick={handleBuildingSelection}
+                      disabled={isSelectingBuilding}
+                      style={{
+                        background: isSelectingBuilding ? '#ccc' : '#28a745',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '3px',
+                        padding: '6px 12px',
+                        cursor: isSelectingBuilding ? 'not-allowed' : 'pointer',
+                        fontSize: '12px',
+                        width: '100%',
+                        marginBottom: '8px'
+                      }}
+                    >
+                      {isSelectingBuilding ? 'Click on a building...' : 'Select Building on Map'}
+                    </button>
+                    {selectedBuildingCoords && (
+                      <div style={{ 
+                        background: '#e8f5e8', 
+                        padding: '6px', 
+                        borderRadius: '3px', 
+                        fontSize: '11px',
+                        color: '#155724',
+                        marginBottom: '8px'
+                      }}>
+                        Selected: {selectedBuildingName}
+                        <br />
+                        Coordinates: {selectedBuildingCoords[0].toFixed(4)}, {selectedBuildingCoords[1].toFixed(4)}
+                        <button
+                          onClick={cancelBuildingSelection}
+                          style={{
+                            background: '#dc3545',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '2px',
+                            padding: '2px 6px',
+                            cursor: 'pointer',
+                            fontSize: '10px',
+                            marginLeft: '8px'
+                          }}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
+                      3D Model File (GLTF/GLB):
+                    </label>
+                    <input
+                      ref={buildingReplacementFileRef}
+                      type="file"
+                      accept=".gltf,.glb"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setReplacementModelUrl(URL.createObjectURL(file));
+                        }
+                      }}
+                      style={{ fontSize: '12px' }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
+                      Scale: {replacementScale}x
+                    </label>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="10"
+                      step="0.1"
+                      value={replacementScale}
+                      onChange={(e) => setReplacementScale(parseFloat(e.target.value))}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
+                      Rotation: {replacementRotation}°
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      step="1"
+                      value={replacementRotation}
+                      onChange={(e) => setReplacementRotation(parseInt(e.target.value))}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      if (selectedReplacementBuilding && replacementModelUrl) {
+                        const newReplacement = {
+                          id: `replacement-${Date.now()}`,
+                          buildingName: selectedReplacementBuilding,
+                          modelUrl: replacementModelUrl,
+                          position: selectedBuildingCoords || [-122.4034, 37.7952] as [number, number], // Use selected coordinates or default
+                          scale: replacementScale,
+                          rotation: replacementRotation
+                        };
+                        setBuildingReplacements(prev => [...prev, newReplacement]);
+                        setSelectedReplacementBuilding('');
+                        setReplacementModelUrl('');
+                        setReplacementScale(1);
+                        setReplacementRotation(0);
+                        if (buildingReplacementFileRef.current) {
+                          buildingReplacementFileRef.current.value = '';
+                        }
+                      }
+                    }}
+                    style={{
+                      background: '#007bff',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '6px 12px',
+                      cursor: 'pointer',
+                      fontSize: '12px'
+                    }}
+                  >
+                    Add Replacement
+                  </button>
+                </div>
+              )}
+
+              {/* List of existing replacements */}
+              {buildingReplacements.length > 0 && (
+                <div>
+                  <h5 style={{ margin: '8px 0', fontSize: '14px' }}>Current Replacements:</h5>
+                  {buildingReplacements.map((replacement) => (
+                    <div key={replacement.id} style={{
+                      background: '#fff',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      padding: '8px',
+                      marginBottom: '6px',
+                      fontSize: '12px'
+                    }}>
+                      <div style={{ fontWeight: 'bold' }}>{replacement.buildingName}</div>
+                      <div style={{ color: '#666', fontSize: '11px' }}>
+                        Scale: {replacement.scale}x | Rotation: {replacement.rotation}°
+                      </div>
+                      <button
+                        onClick={() => {
+                          setBuildingReplacements(prev => 
+                            prev.filter(r => r.id !== replacement.id)
+                          );
+                        }}
+                        style={{
+                          background: '#dc3545',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '3px',
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          fontSize: '11px',
+                          marginTop: '4px'
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Draggable>
+      )}
     </div>
   );
 };
