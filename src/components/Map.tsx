@@ -7,6 +7,7 @@ import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
+import FreehandMode from 'mapbox-gl-draw-freehand-mode';
 
 interface MapProps {
   accessToken: string;
@@ -32,6 +33,15 @@ interface Building {
   length: number;
   isCloud?: boolean;
   base?: number;
+  groupId?: string;
+}
+
+interface BuildingGroup {
+  id: string;
+  name: string;
+  color: string;
+  visible: boolean;
+  buildings: string[]; // Array of building IDs
 }
 
 interface Model3D {
@@ -108,6 +118,11 @@ const Map: React.FC<MapProps> = ({
   const [isDrawing, setIsDrawing] = useState(false);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | null>(null);
+  const [buildingGroups, setBuildingGroups] = useState<BuildingGroup[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [showGroupPanel, setShowGroupPanel] = useState(false);
+  const [isGroupSelectionMode, setIsGroupSelectionMode] = useState(false);
+  const [selectedBuildingsForGroup, setSelectedBuildingsForGroup] = useState<string[]>([]);
   const [models3D, setModels3D] = useState<Model3D[]>([]);
   const [showModelImport, setShowModelImport] = useState(false);
   const [isPlacingModel, setIsPlacingModel] = useState(false);
@@ -141,7 +156,7 @@ const Map: React.FC<MapProps> = ({
     end: [number, number];
     name: string;
   }>>([]);
-  const originalSkyPaint = useRef<any>(null);
+
 
   const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
   const [buildingProperties, setBuildingProperties] = useState({
@@ -152,8 +167,7 @@ const Map: React.FC<MapProps> = ({
   const [buildingPosition, setBuildingPosition] = useState<[number, number] | null>(null);
   const [isCloudNext, setIsCloudNext] = useState(false);
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
-  const [worldBuildingColor, setWorldBuildingColor] = useState('#808080'); // Default gray color for world buildings
-  const [fogEnabled, setFogEnabled] = useState(true);
+  const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -177,6 +191,9 @@ const Map: React.FC<MapProps> = ({
   const [isSelectingBuilding, setIsSelectingBuilding] = useState(false);
   const [selectedBuildingCoords, setSelectedBuildingCoords] = useState<[number, number] | null>(null);
   const [selectedBuildingName, setSelectedBuildingName] = useState<string>('');
+
+  // Add new state for panel type
+  const [creationPanelType, setCreationPanelType] = useState<'building' | 'cloud'>('building');
 
   const mapStyles = [
     { id: 'mapbox://styles/mapbox/streets-v12', name: 'Streets' },
@@ -250,6 +267,10 @@ const Map: React.FC<MapProps> = ({
 
       // Wait for style to be loaded before making changes
       map.current.once('style.load', () => {
+        // Remove any fog from the style (in case the style has default fog)
+        if (map.current) {
+          try { map.current.setFog({}); } catch (e) { /* ignore */ }
+        }
         console.log('Style loaded, restoring camera position');
         // Restore camera position
         map.current?.setCenter(currentCenter);
@@ -321,10 +342,11 @@ const Map: React.FC<MapProps> = ({
   const changeWorldBuildingColor = (newColor: string) => {
     console.log('Changing world building color to:', newColor);
     setWorldBuildingColor(newColor);
-    
-    // Reinitialize layers to apply the new color
+    // Only reinitialize layers to update building color, do not touch sky or background
     if (map.current && map.current.isStyleLoaded()) {
       setTimeout(() => {
+        // Only update building layers, not sky/background
+        // So just call initializeLayers as before, but ensure initializeLayers does not use worldBuildingColor for sky/background
         initializeLayers();
       }, 100);
     }
@@ -421,25 +443,32 @@ const Map: React.FC<MapProps> = ({
         'id': 'sky',
         'type': 'sky',
         'paint': {
-          'sky-type': 'atmosphere',
-          'sky-atmosphere-sun': [0.0, 45.0],
-          'sky-atmosphere-sun-intensity': 5,
-          'sky-atmosphere-color': '#89b0f5',
-          'sky-opacity': 0.9,
+          'sky-type': 'gradient',
           'sky-gradient-center': [0, 0],
+          'sky-gradient-radius': 90,
           'sky-gradient': [
             'interpolate',
             ['linear'],
             ['sky-radial-progress'],
-            0.0,
-            '#1e90ff',
-            0.5,
-            '#87ceeb',
-            1.0,
-            '#ffffff'
-          ]
-        }
-      });
+            0.0, '#7ec8e3', // solid blue
+            1.0, '#7ec8e3'  // solid blue
+          ],
+          'sky-opacity': 1.0
+        } as any
+      }, map.current.getStyle().layers[map.current.getStyle().layers.length - 1].id);
+      
+      // Ensure solid blue sky with no fog effects
+      
+      // Set the background color to match the solid blue
+      if (currentMap.getLayer('background')) {
+        currentMap.setPaintProperty('background', 'background-color', '#7ec8e3');
+      } else {
+        currentMap.addLayer({
+          'id': 'background',
+          'type': 'background',
+          'paint': { 'background-color': '#7ec8e3' }
+        }, 'sky');
+      }
     } catch (e) {
       console.error("Error adding sky layer:", e);
     }
@@ -1533,9 +1562,8 @@ const Map: React.FC<MapProps> = ({
       bearing: -30,
       antialias: true,
       maxPitch: 85,
-      maxZoom: 24,
-      minZoom: 0,
-      projection: 'globe',
+      maxZoom: 24, // maximum allowed by Mapbox
+      minZoom: 0, // minimum allowed
       renderWorldCopies: false
     });
 
@@ -1544,10 +1572,16 @@ const Map: React.FC<MapProps> = ({
     // Add navigation controls
     mapInstance.addControl(new mapboxgl.NavigationControl());
 
-    // Add MapboxDraw
-    const drawInstance = new MapboxDraw({
+    // Get default modes from a temporary instance
+    const defaultModes = (MapboxDraw as any).modes || (new (MapboxDraw as any)()).modes;
+
+    const drawInstance = new (MapboxDraw as any)({
       displayControlsDefault: false,
-      controls: { polygon: false, trash: false }
+      controls: { polygon: false, trash: false },
+      modes: {
+        ...defaultModes,
+        draw_polygon: FreehandMode
+      }
     });
     mapInstance.addControl(drawInstance, 'top-left');
     setDraw(drawInstance);
@@ -1633,13 +1667,7 @@ const Map: React.FC<MapProps> = ({
       setCameraPathLayer(mapInstance.getLayer('camera-path') as mapboxgl.Layer);
       setCameraDirectionLayer(mapInstance.getLayer('camera-direction') as mapboxgl.Layer);
 
-      // Add atmosphere effect for globe view
-      // Store original sky paint properties and apply atmosphere
-      const skyLayer = mapInstance.getLayer('sky');
-      if (skyLayer) {
-        originalSkyPaint.current = mapInstance.getPaintProperty('sky', 'sky-color' as any);
-        // You might want to store and restore other sky properties like atmosphere
-      }
+      // Note: Removed sky property storage to prevent runtime errors
 
       // Hide labels initially since showLabels is false
       const layers = mapInstance.getStyle().layers;
@@ -1668,10 +1696,11 @@ const Map: React.FC<MapProps> = ({
 
     // Listen for draw.create event
     mapInstance.on('draw.create', (e: any) => {
+      // Handle the creation of a new building or cloud
       setIsDrawing(false);
       const feature = e.features[0];
       const id = feature.id || `${Date.now()}-${Math.random()}`;
-      
+
       // Calculate center point of the drawn area
       const coordinates = feature.geometry.coordinates[0];
       const center = coordinates.reduce(
@@ -1692,35 +1721,40 @@ const Map: React.FC<MapProps> = ({
         }),
         { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }
       );
-      
       const width = Math.abs(bounds.maxX - bounds.minX);
       const length = Math.abs(bounds.maxY - bounds.minY);
-      
-      // Check if we're in cloud creation mode
-      if (isDrawing) {
-        // Then ask for name
-        const buildingName = prompt('What would you like to name this cloud?') || `Cloud ${buildings.length + 1}`;
-        
-        // Set building color to white (clouds)
-        const buildingColor = '#ffffff';
-        
-        setBuildings(prev => [
-          ...prev,
-          {
-            id,
-            feature,
-            height: 50,
-            name: buildingName,
-            color: buildingColor,
-            position: center,
-            width,
-            length
+
+      // Always create a building (not a cloud) with correct properties
+      const newBuilding = {
+        id,
+        feature: {
+          ...feature,
+          properties: {
+            ...feature.properties,
+            height: buildingProperties.height,
+            color: buildingProperties.color,
+            name: buildingProperties.name || `Building ${buildings.length + 1}`,
+            base: 0
           }
-        ]);
-        // Delete the drawn polygon
-        if (draw) {
-          draw.delete(feature.id);
-        }
+        },
+        height: buildingProperties.height,
+        name: buildingProperties.name || `Building ${buildings.length + 1}`,
+        color: buildingProperties.color,
+        position: center,
+        width,
+        length,
+        isCloud: false,
+        base: 0
+      };
+      setBuildings(prev => {
+        const updated = [...prev, newBuilding];
+        console.log('Updated buildings:', updated);
+        return updated;
+      });
+
+      // Remove the drawn feature from Mapbox Draw so only the 3D extrusion remains
+      if (draw) {
+        draw.delete(feature.id);
       }
     });
 
@@ -1743,33 +1777,8 @@ const Map: React.FC<MapProps> = ({
 
       const isUnderBuildingArea = typeof cameraAltitude === 'number' && cameraAltitude < minBuildingHeight && buildings.length > 0;
 
-      const skyLayer = map.current.getLayer('sky');
-      if (skyLayer) {
-        if (isUnderBuildingArea) {
-          // Change sky to white
-          map.current.setPaintProperty('sky', 'sky-color' as any, '#ffffff');
-          map.current.setPaintProperty('sky', 'sky-atmosphere-color' as any, '#ffffff');
-          map.current.setPaintProperty('sky', 'sky-atmosphere-gradient' as any, ['interpolate', ['linear'], ['sky-radial-progress'], 0.0, '#ffffff', 1.0, '#ffffff']);
-        } else {
-          // Revert to original sky color
-          if (originalSkyPaint.current) {
-             map.current.setPaintProperty('sky', 'sky-color' as any, originalSkyPaint.current);
-             // You might need to restore other original atmosphere properties here
-             map.current.setPaintProperty('sky', 'sky-atmosphere-color' as any, 'rgb(186, 210, 235)'); // Example: restore a default or stored value
-             map.current.setPaintProperty('sky', 'sky-atmosphere-gradient' as any, [
-              'interpolate',
-              ['linear'],
-              ['sky-radial-progress'],
-              0.0,
-              '#1e90ff',
-              0.5,
-              '#87ceeb',
-              1.0,
-              '#ffffff'
-            ]); // Example: restore a default or stored value
-          }
-        }
-      }
+      // Note: Sky color changes removed to prevent runtime errors
+      // The sky will remain solid blue to avoid fog effects
     });
 
     // Cleanup function
@@ -1780,160 +1789,6 @@ const Map: React.FC<MapProps> = ({
       }
     };
   }, []);
-
-  // Effect to manage fog based on state
-  useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded() || (map.current as any)._removed) {
-      return;
-    }
-    if (fogEnabled) {
-      map.current.setFog({
-        'color': 'rgba(186,210,235,0.2)',
-        'high-color': 'rgb(36, 92, 223)',
-        'horizon-blend': 0.001,
-        'space-color': 'rgb(11, 11, 25)',
-        'star-intensity': 0.6
-      });
-    } else {
-      map.current.setFog({}); // Disables fog by setting an empty object
-    }
-  }, [fogEnabled, map.current]);
-
-  // Reinitialize when 3D settings change
-  useEffect(() => {
-    if (map.current && map.current.isStyleLoaded()) {
-      console.log("3D settings changed, reinitializing layers");
-      initializeLayers();
-    }
-  }, [layers3D]);
-
-  // Effect to render all buildings as a single GeoJSON source/layer
-  useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded()) return;
-
-    const currentMap = map.current;
-    const buildingSourceId = 'custom-buildings';
-    const cloudSourceId = 'custom-clouds';
-
-    // Handle buildings
-    if (currentMap.getSource(buildingSourceId)) {
-      if (buildings.filter(b => !b.isCloud).length === 0) {
-        if (currentMap.getLayer(buildingSourceId)) currentMap.removeLayer(buildingSourceId);
-        if (currentMap.getSource(buildingSourceId)) currentMap.removeSource(buildingSourceId);
-      } else {
-        const buildingFeatures = buildings
-          .filter(b => !b.isCloud)
-          .map(b => ({
-            ...b.feature,
-            properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
-          }));
-
-        (currentMap.getSource(buildingSourceId) as mapboxgl.GeoJSONSource).setData({
-          type: 'FeatureCollection',
-          features: buildingFeatures
-        });
-      }
-    } else if (buildings.filter(b => !b.isCloud).length > 0) {
-      currentMap.addSource(buildingSourceId, {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: buildings
-            .filter(b => !b.isCloud)
-            .map(b => ({
-              ...b.feature,
-              properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
-            }))
-        }
-      });
-
-      currentMap.addLayer({
-        id: buildingSourceId,
-        type: 'fill-extrusion',
-        source: buildingSourceId,
-        paint: {
-          'fill-extrusion-color': ['get', 'color'],
-          'fill-extrusion-base': 0,
-          'fill-extrusion-height': ['get', 'height'],
-          'fill-extrusion-opacity': 1.0,
-          'fill-extrusion-vertical-gradient': false
-        }
-      });
-    }
-
-    // Handle clouds separately
-    if (currentMap.getSource(cloudSourceId)) {
-      if (buildings.filter(b => b.isCloud).length === 0) {
-        if (currentMap.getLayer(cloudSourceId)) currentMap.removeLayer(cloudSourceId);
-        if (currentMap.getSource(cloudSourceId)) currentMap.removeSource(cloudSourceId);
-      } else {
-        const cloudFeatures = buildings
-          .filter(b => b.isCloud)
-          .map(b => ({
-            ...b.feature,
-            properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
-          }));
-
-        (currentMap.getSource(cloudSourceId) as mapboxgl.GeoJSONSource).setData({
-          type: 'FeatureCollection',
-          features: cloudFeatures
-        });
-      }
-    } else if (buildings.filter(b => b.isCloud).length > 0) {
-      currentMap.addSource(cloudSourceId, {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: buildings
-            .filter(b => b.isCloud)
-            .map(b => ({
-              ...b.feature,
-              properties: { ...b.feature.properties, height: b.height, id: b.id, color: b.color }
-            }))
-        }
-      });
-
-      currentMap.addLayer({
-        id: cloudSourceId,
-        type: 'fill-extrusion',
-        source: cloudSourceId,
-        paint: {
-          'fill-extrusion-color': ['get', 'color'],
-          'fill-extrusion-base': ['get', 'height'], // Remove bottom face for clouds
-          'fill-extrusion-height': ['get', 'height'],
-          'fill-extrusion-opacity': 0.8,
-          'fill-extrusion-vertical-gradient': true
-        }
-      });
-    }
-
-    return () => {
-      const mapInstance = map.current;
-      if (!mapInstance || (mapInstance as any)._removed || !mapInstance.isStyleLoaded()) {
-        return;
-      }
-      try {
-        if (mapInstance.getLayer(buildingSourceId)) {
-          mapInstance.removeLayer(buildingSourceId);
-        }
-      } catch(e) { /* ignore */ }
-      try {
-        if (mapInstance.getSource(buildingSourceId)) {
-          mapInstance.removeSource(buildingSourceId);
-        }
-      } catch(e) { /* ignore */ }
-      try {
-        if (mapInstance.getLayer(cloudSourceId)) {
-          mapInstance.removeLayer(cloudSourceId);
-        }
-      } catch(e) { /* ignore */ }
-      try {
-        if (mapInstance.getSource(cloudSourceId)) {
-          mapInstance.removeSource(cloudSourceId);
-        }
-      } catch(e) { /* ignore */ }
-    };
-  }, [buildings]);
 
   // Effect to handle 3D models
   useEffect(() => {
@@ -1953,6 +1808,7 @@ const Map: React.FC<MapProps> = ({
         onAdd: function(map, gl) {
           (this as any).map = map;
           (this as any).camera = new THREE.Camera();
+          (this as any).camera.far = 10000000;
           (this as any).scene = new THREE.Scene();
           (this as any).renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl });
           (this as any).renderer.autoClear = false;
@@ -1969,7 +1825,7 @@ const Map: React.FC<MapProps> = ({
             const width = cloud.width * 100000; // scale for visualization
             const length = cloud.length * 100000;
             const height = cloud.height;
-            const base = cloud.base ?? 50;
+            const base = cloud.base ?? 200;
             const geometry = new THREE.BoxGeometry(width, height, length);
             geometry.deleteAttribute('uv');
             geometry.deleteAttribute('normal');
@@ -1985,8 +1841,9 @@ const Map: React.FC<MapProps> = ({
             ];
             const mesh = new THREE.Mesh(geometry, materials);
             const [lng, lat] = cloud.position;
-            const merc = mapboxgl.MercatorCoordinate.fromLngLat({ lng, lat }, 0);
-            mesh.position.set(merc.x, merc.y, base + height / 2);
+            // Use altitude in meters for MercatorCoordinate
+            const merc = mapboxgl.MercatorCoordinate.fromLngLat({ lng, lat }, base + height / 2);
+            mesh.position.set(merc.x, merc.y, merc.z);
             (this as any).scene.add(mesh);
           });
         },
@@ -2010,6 +1867,7 @@ const Map: React.FC<MapProps> = ({
         type: 'custom',
         onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
           (this as any).camera = new THREE.Camera();
+          (this as any).camera.far = 10000000;
           (this as any).scene = new THREE.Scene();
           (this as any).renderer = new THREE.WebGLRenderer({
             canvas: map.getCanvas(),
@@ -2130,6 +1988,7 @@ const Map: React.FC<MapProps> = ({
         type: 'custom',
         onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
           (this as any).camera = new THREE.Camera();
+          (this as any).camera.far = 10000000;
           (this as any).scene = new THREE.Scene();
           (this as any).renderer = new THREE.WebGLRenderer({
             canvas: map.getCanvas(),
@@ -2327,38 +2186,29 @@ const Map: React.FC<MapProps> = ({
         const length = Math.abs(bounds.maxY - bounds.minY);
 
         // Create a new building
-        const isCloud = isCloudNext;
         const newBuilding: Building = {
           id: `building-${Date.now()}`,
           feature: {
-            type: 'Feature',
-            geometry: {
-              type: 'Polygon',
-              coordinates: [coordinates]
-            },
+            ...feature,
             properties: {
-              height: buildingProperties.height,
-              name: buildingProperties.name || (isCloud ? `Cloud ${buildings.length + 1}` : `Building ${buildings.length + 1}`),
-              color: isCloud ? '#ffffff' : buildingProperties.color
+              ...feature.properties,
+              height: buildingProperties.height, // <--- ensure this is set
+              color: buildingProperties.color,
+              name: buildingProperties.name || `Building ${buildings.length + 1}`
             }
           },
           height: buildingProperties.height,
-          name: buildingProperties.name || (isCloud ? `Cloud ${buildings.length + 1}` : `Building ${buildings.length + 1}`),
-          color: isCloud ? '#ffffff' : buildingProperties.color,
+          name: buildingProperties.name || `Building ${buildings.length + 1}`,
+          color: buildingProperties.color,
           position: center,
           width,
           length,
-          isCloud: isCloud,
-          base: isCloud ? 50 : 0 // <-- add this line
+          isCloud: false,
+          base: 0
         };
 
         // Add the building to the map
-        if (isCloud) {
-          addCloudToMap(newBuilding);
-          hideBottomLayersUnderPolygon(coordinates);
-        } else {
-          addBuildingToMap(newBuilding);
-        }
+        addBuildingToMap(newBuilding);
         
         // Delete the drawn polygon
         draw.delete(feature.id);
@@ -2439,167 +2289,170 @@ const Map: React.FC<MapProps> = ({
   };
 
   const renderBuildingCreationPanel = () => {
-    const isCloud = isCloudNext;
+    const isCloud = creationPanelType === 'cloud';
     const title = isCloud ? 'Create Cloud' : 'Create Building';
     const buttonText = isCloud ? 'Start Drawing Cloud' : 'Start Drawing Building';
     
     return (
-      <Draggable nodeRef={buildingCreationPanelRef as React.RefObject<HTMLElement>}>
-        <div ref={buildingCreationPanelRef} className="building-creation-panel enhanced-creation-panel" style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          background: 'rgba(255,255,255,0.8)',
-          backdropFilter: 'blur(8px)',
-          padding: '28px 24px',
-          borderRadius: '16px',
-          boxShadow: '0 8px 32px rgba(33,150,243,0.12)',
-          zIndex: 1000,
-          cursor: 'move',
-          minWidth: '280px',
-          maxWidth: '350px',
-          fontFamily: 'inherit'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-            <h3 style={{ margin: 0, fontWeight: 700, color: '#1976d2', fontSize: 22, letterSpacing: 1 }}>{title}</h3>
-            <button
-              onClick={() => setShowBuildingCreationPanel(false)}
-              style={{
-                background: 'none',
-                border: 'none',
-                fontSize: '22px',
-                cursor: 'pointer',
-                color: '#666',
-                fontWeight: 700
-              }}
-            >
-              ×
-            </button>
-          </div>
-          <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Name:</label>
-            <input
-              type="text"
-              value={buildingProperties.name}
-              onChange={(e) => setBuildingProperties(prev => ({ ...prev, name: e.target.value }))}
-              placeholder={isCloud ? "Enter cloud name" : "Enter building name"}
-              style={{
-                width: '100%',
-                padding: '10px',
-                border: '1.5px solid #b3c6e0',
-                borderRadius: '8px',
-                boxSizing: 'border-box',
-                fontSize: 16,
-                background: '#f7fafd',
-                color: '#222',
-                fontWeight: 500,
-                outline: 'none',
-                marginBottom: 0,
-                transition: 'border 0.2s'
-              }}
-            />
-          </div>
-          <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Height (meters):</label>
-            <input
-              type="number"
-              value={buildingProperties.height}
-              onChange={(e) => setBuildingProperties(prev => ({ ...prev, height: Number(e.target.value) }))}
-              min="1"
-              max="1000"
-              style={{
-                width: '100%',
-                padding: '10px',
-                border: '1.5px solid #b3c6e0',
-                borderRadius: '8px',
-                boxSizing: 'border-box',
-                fontSize: 16,
-                background: '#f7fafd',
-                color: '#222',
-                fontWeight: 500,
-                outline: 'none',
-                marginBottom: 0,
-                transition: 'border 0.2s'
-              }}
-            />
-          </div>
-          {!isCloud && (
-            <div style={{ marginBottom: '20px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Color:</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <input
-                  type="color"
-                  value={buildingProperties.color}
-                  onChange={(e) => setBuildingProperties(prev => ({ ...prev, color: e.target.value }))}
-                  style={{
-                    width: '50px',
-                    height: '40px',
-                    border: 'none',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
-                  }}
-                />
-                <span style={{ color: '#666', fontSize: '14px' }}>{buildingProperties.color}</span>
-              </div>
-            </div>
-          )}
-          {isCloud && (
-            <div style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <div style={{
-                  width: '50px',
-                  height: '40px',
-                  backgroundColor: '#ffffff',
-                  border: '2px solid #b3c6e0',
-                  borderRadius: '8px'
-                }}></div>
-                <span style={{ color: '#1976d2', fontSize: '14px', fontWeight: 500 }}>Clouds are always white</span>
-              </div>
-            </div>
-          )}
+      <div ref={buildingCreationPanelRef} className="building-creation-panel enhanced-creation-panel" style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        height: '100vh',
+        background: 'rgba(255,255,255,0.98)',
+        backdropFilter: 'blur(8px)',
+        padding: '28px 24px',
+        borderTopLeftRadius: 0,
+        borderBottomLeftRadius: 0,
+        borderTopRightRadius: '16px',
+        borderBottomRightRadius: '16px',
+        boxShadow: '0 8px 32px rgba(33,150,243,0.12)',
+        zIndex: 1000,
+        minWidth: '250px',
+        maxWidth: '350px',
+        fontFamily: 'inherit',
+        overflowY: 'auto',
+        cursor: 'default'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+          <h3 style={{ margin: 0, fontWeight: 700, color: '#1976d2', fontSize: 22, letterSpacing: 1 }}>{title}</h3>
           <button
-            onClick={() => {
-              setShowBuildingCreationPanel(false);
-              // Set default height before starting creation
-              setBuildingProperties(prev => ({ ...prev, height: isCloudNext ? 50 : 20 }));
-              startBuildingCreation();
-            }}
+            onClick={() => setShowBuildingCreationPanel(false)}
             style={{
-              backgroundColor: isCloud ? '#2196f3' : '#4CAF50',
-              color: 'white',
+              background: 'none',
               border: 'none',
-              padding: '14px 0',
-              borderRadius: '8px',
+              fontSize: '22px',
               cursor: 'pointer',
-              width: '100%',
-              fontSize: '18px',
-              fontWeight: 'bold',
-              boxShadow: '0 2px 8px rgba(33,150,243,0.08)',
-              marginTop: 8,
-              letterSpacing: 1
+              color: '#666',
+              fontWeight: 700
             }}
           >
-            {buttonText}
+            ×
           </button>
-          {isCreatingBuilding && (
-            <div style={{ marginTop: '14px', color: '#1976d2', fontSize: '15px', textAlign: 'center', fontWeight: 500 }}>
-              Click on the map to draw the {isCloud ? 'cloud' : 'building'}&apos;s base. Click the first point again to complete the shape.
-            </div>
-          )}
-          <style>{`
-            .enhanced-creation-panel input[type="text"],
-            .enhanced-creation-panel input[type="number"] {
-              box-shadow: 0 2px 8px rgba(33,150,243,0.04);
-            }
-            .enhanced-creation-panel input[type="text"]:focus,
-            .enhanced-creation-panel input[type="number"]:focus {
-              border: 1.5px solid #2196f3;
-              background: #e3f2fd;
-            }
-          `}</style>
         </div>
-      </Draggable>
+        <div style={{ marginBottom: '18px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Name:</label>
+          <input
+            type="text"
+            value={buildingProperties.name}
+            onChange={(e) => setBuildingProperties(prev => ({ ...prev, name: e.target.value }))}
+            placeholder={isCloud ? "Enter cloud name" : "Enter building name"}
+            style={{
+              width: '100%',
+              padding: '10px',
+              border: '1.5px solid #b3c6e0',
+              borderRadius: '8px',
+              boxSizing: 'border-box',
+              fontSize: 16,
+              background: '#f7fafd',
+              color: '#222',
+              fontWeight: 500,
+              outline: 'none',
+              marginBottom: 0,
+              transition: 'border 0.2s'
+            }}
+          />
+        </div>
+        <div style={{ marginBottom: '18px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Height (meters):</label>
+          <input
+            type="number"
+            value={buildingProperties.height}
+            onChange={(e) => setBuildingProperties(prev => ({ ...prev, height: Number(e.target.value) }))}
+            min="1"
+            max="1000"
+            style={{
+              width: '100%',
+              padding: '10px',
+              border: '1.5px solid #b3c6e0',
+              borderRadius: '8px',
+              boxSizing: 'border-box',
+              fontSize: 16,
+              background: '#f7fafd',
+              color: '#222',
+              fontWeight: 500,
+              outline: 'none',
+              marginBottom: 0,
+              transition: 'border 0.2s'
+            }}
+          />
+        </div>
+        {!isCloud && (
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#1976d2' }}>Color:</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="color"
+                value={buildingProperties.color}
+                onChange={(e) => setBuildingProperties(prev => ({ ...prev, color: e.target.value }))}
+                style={{
+                  width: '50px',
+                  height: '40px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
+                }}
+              />
+              <span style={{ color: '#666', fontSize: '14px' }}>{buildingProperties.color}</span>
+            </div>
+          </div>
+        )}
+        {isCloud && (
+          <div style={{ marginBottom: '20px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '50px',
+                height: '40px',
+                backgroundColor: '#ffffff',
+                border: '2px solid #b3c6e0',
+                borderRadius: '8px'
+              }}></div>
+              <span style={{ color: '#1976d2', fontSize: '14px', fontWeight: 500 }}>Clouds are always white</span>
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => {
+            setShowBuildingCreationPanel(false);
+            // Set default height before starting creation
+            setBuildingProperties(prev => ({ ...prev, height: creationPanelType === 'cloud' ? 50 : 20 }));
+            startBuildingCreation();
+          }}
+          style={{
+            backgroundColor: creationPanelType === 'cloud' ? '#2196f3' : '#4CAF50',
+            color: 'white',
+            border: 'none',
+            padding: '14px 0',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            width: '100%',
+            fontSize: '18px',
+            fontWeight: 'bold',
+            boxShadow: '0 2px 8px rgba(33,150,243,0.08)',
+            marginTop: 8,
+            letterSpacing: 1
+          }}
+        >
+          {buttonText}
+        </button>
+        {isCreatingBuilding && (
+          <div style={{ marginTop: '14px', color: '#1976d2', fontSize: '15px', textAlign: 'center', fontWeight: 500 }}>
+            Click on the map to draw the {creationPanelType === 'cloud' ? 'cloud' : 'building'}&apos;s base. Click the first point again to complete the shape.
+          </div>
+        )}
+        <style>{`
+          .enhanced-creation-panel input[type="text"],
+          .enhanced-creation-panel input[type="number"] {
+            box-shadow: 0 2px 8px rgba(33,150,243,0.04);
+          }
+          .enhanced-creation-panel input[type="text"]:focus,
+          .enhanced-creation-panel input[type="number"]:focus {
+            border: 1.5px solid #2196f3;
+            background: #e3f2fd;
+          }
+        `}</style>
+      </div>
     );
   };
 
@@ -2802,6 +2655,240 @@ const Map: React.FC<MapProps> = ({
     }
   };
 
+  // Building group management functions
+  const createBuildingGroup = (name: string, color: string) => {
+    const newGroup: BuildingGroup = {
+      id: `group-${Date.now()}-${Math.random()}`,
+      name,
+      color,
+      visible: true,
+      buildings: []
+    };
+    setBuildingGroups(prev => [...prev, newGroup]);
+    return newGroup.id;
+  };
+
+  const addBuildingToGroup = (buildingId: string, groupId: string) => {
+    setBuildings(prev => prev.map(building => 
+      building.id === buildingId 
+        ? { ...building, groupId } 
+        : building
+    ));
+    
+    setBuildingGroups(prev => prev.map(group =>
+      group.id === groupId
+        ? { ...group, buildings: [...group.buildings, buildingId] }
+        : group
+    ));
+  };
+
+  const removeBuildingFromGroup = (buildingId: string) => {
+    setBuildings(prev => prev.map(building => 
+      building.id === buildingId 
+        ? { ...building, groupId: undefined } 
+        : building
+    ));
+    
+    setBuildingGroups(prev => prev.map(group =>
+      group.id === buildingId
+        ? { ...group, buildings: group.buildings.filter(id => id !== buildingId) }
+        : group
+    ));
+  };
+
+  const toggleGroupVisibility = (groupId: string) => {
+    setBuildingGroups(prev => prev.map(group =>
+      group.id === groupId
+        ? { ...group, visible: !group.visible }
+        : group
+    ));
+  };
+
+  const deleteBuildingGroup = (groupId: string) => {
+    // Remove groupId from all buildings in this group
+    setBuildings(prev => prev.map(building => 
+      building.groupId === groupId 
+        ? { ...building, groupId: undefined } 
+        : building
+    ));
+    
+    // Remove the group
+    setBuildingGroups(prev => prev.filter(group => group.id !== groupId));
+  };
+
+  const getBuildingsInGroup = (groupId: string) => {
+    return buildings.filter(building => building.groupId === groupId);
+  };
+
+  const getUngroupedBuildings = () => {
+    return buildings.filter(building => !building.groupId);
+  };
+
+  const toggleBuildingSelectionForGroup = (buildingId: string) => {
+    setSelectedBuildingsForGroup(prev => {
+      if (prev.includes(buildingId)) {
+        return prev.filter(id => id !== buildingId);
+      } else {
+        return [...prev, buildingId];
+      }
+    });
+  };
+
+  const createGroupFromSelectedBuildings = (groupName: string, groupColor: string) => {
+    if (selectedBuildingsForGroup.length === 0) return;
+
+    const groupId = createBuildingGroup(groupName, groupColor);
+    
+    // Add all selected buildings to the new group
+    selectedBuildingsForGroup.forEach(buildingId => {
+      addBuildingToGroup(buildingId, groupId);
+    });
+
+    // Reset selection mode
+    setIsGroupSelectionMode(false);
+    setSelectedBuildingsForGroup([]);
+  };
+
+  const cancelGroupSelection = () => {
+    setIsGroupSelectionMode(false);
+    setSelectedBuildingsForGroup([]);
+  };
+
+  // Add this effect after the buildings state is defined
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+
+    // Remove previous custom buildings layer/source if they exist
+    if (map.current.getLayer('custom-buildings')) {
+      map.current.removeLayer('custom-buildings');
+    }
+    if (map.current.getSource('custom-buildings')) {
+      map.current.removeSource('custom-buildings');
+    }
+
+    if (buildings.length === 0) return;
+
+    // Create a GeoJSON FeatureCollection for all user buildings (not clouds)
+    const features: GeoJSON.Feature<GeoJSON.Polygon>[] = buildings
+      .filter(b => !b.isCloud)
+      .filter(b => {
+        // If building is in a group, check if group is visible
+        if (b.groupId) {
+          const group = buildingGroups.find(g => g.id === b.groupId);
+          return group ? group.visible : true;
+        }
+        return true; // Ungrouped buildings are always visible
+      })
+      .map(b => {
+        // Ensure the polygon is closed
+        let coords = (b.feature.geometry as GeoJSON.Polygon).coordinates[0];
+        if (coords.length > 2 && (coords[0][0] !== coords[coords.length-1][0] || coords[0][1] !== coords[coords.length-1][1])) {
+          coords = [...coords, coords[0]];
+        }
+        // Set minimum height
+        const height = b.height && b.height > 0 ? b.height : 1;
+        return {
+          type: 'Feature',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [coords]
+          },
+          properties: {
+            height,
+            color: b.color || '#ffffff',
+            base: b.base || 0
+          }
+        };
+      });
+    // Debug log
+    console.log('3D building features:', features);
+
+    map.current.addSource('custom-buildings', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features
+      }
+    });
+
+    map.current.addLayer({
+      id: 'custom-buildings',
+      type: 'fill-extrusion',
+      source: 'custom-buildings',
+      paint: {
+        'fill-extrusion-color': ['get', 'color'],
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-base': ['get', 'base'],
+        'fill-extrusion-opacity': 1.0,
+        'fill-extrusion-vertical-gradient': true,
+        'fill-extrusion-translate': [0.5, 0.5],
+        'fill-extrusion-translate-anchor': 'viewport'
+      }
+    });
+    // Move the custom-buildings layer to the top to ensure visibility
+    map.current.moveLayer('custom-buildings');
+    // Force a repaint
+    map.current.triggerRepaint();
+  }, [buildings]);
+
+  // ... existing code ...
+  // Remove the 3D buildings effect and replace with 2D polygon logic
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+
+    // Remove previous 2D base layer/source if they exist
+    if (map.current.getLayer('user-buildings-2d')) {
+      map.current.removeLayer('user-buildings-2d');
+    }
+    if (map.current.getSource('user-buildings-2d')) {
+      map.current.removeSource('user-buildings-2d');
+    }
+
+    if (buildings.length === 0) return;
+
+    // Create a GeoJSON FeatureCollection for all user buildings (2D only)
+    const features: GeoJSON.Feature<GeoJSON.Polygon>[] = buildings.map(b => {
+      // Ensure the polygon is closed
+      let coords = (b.feature.geometry as GeoJSON.Polygon).coordinates[0];
+      if (coords.length > 2 && (coords[0][0] !== coords[coords.length-1][0] || coords[0][1] !== coords[coords.length-1][1])) {
+        coords = [...coords, coords[0]];
+      }
+      return {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [coords]
+        },
+        properties: {
+          color: b.color || '#2196f3',
+          name: b.name || ''
+        }
+      };
+    });
+    // Debug log
+    console.log('2D building features:', features);
+
+    map.current.addSource('user-buildings-2d', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features
+      }
+    });
+
+    map.current.addLayer({
+      id: 'user-buildings-2d',
+      type: 'fill',
+      source: 'user-buildings-2d',
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': 0.5
+      }
+    });
+    map.current.moveLayer('user-buildings-2d');
+    map.current.triggerRepaint();
+  }, [buildings]);
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
@@ -2879,7 +2966,8 @@ const Map: React.FC<MapProps> = ({
           </button>
           <button
             onClick={() => {
-              setIsCloudNext(false);
+              setShowSettings(false);
+              setCreationPanelType('building');
               setShowBuildingCreationPanel(true);
             }}
             className="sidepanel-btn"
@@ -2905,7 +2993,8 @@ const Map: React.FC<MapProps> = ({
           </button>
           <button
             onClick={() => {
-              setIsCloudNext(true);
+              setShowSettings(false);
+              setCreationPanelType('cloud');
               setShowBuildingCreationPanel(true);
             }}
             className="sidepanel-btn"
@@ -2952,31 +3041,6 @@ const Map: React.FC<MapProps> = ({
           >
             Start Recording
           </button>
-          {/* Toggle button attached to the panel */}
-          <button
-            className="sidepanel-toggle-btn"
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: '50%',
-              background: 'rgba(255,255,255,0.92)',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-              border: '1px solid #e5e7eb',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              fontSize: 16,
-              transition: 'background 0.18s',
-              outline: 'none',
-              color: '#1976d2',
-              marginLeft: 8,
-            }}
-            title={showSidePanel ? 'Hide panel' : 'Show panel'}
-            onClick={() => setShowSidePanel(v => !v)}
-          >
-            {showSidePanel ? <span role="img" aria-label="Hide">▲</span> : <span role="img" aria-label="Show">▼</span>}
-          </button>
         </div>
         {/* Separate toggle button that stays visible when panel is collapsed */}
         {!showSidePanel && (
@@ -2990,7 +3054,7 @@ const Map: React.FC<MapProps> = ({
               width: 32,
               height: 32,
               borderRadius: '50%',
-              background: 'rgba(255,255,255,0.92)',
+              background: 'rgba(0, 170, 255, 0.92)',
               boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
               border: '1px solid #e5e7eb',
               display: 'flex',
@@ -3112,6 +3176,211 @@ const Map: React.FC<MapProps> = ({
 
       {/* Building Creation Panel */}
       {showBuildingCreationPanel && renderBuildingCreationPanel()}
+
+      {/* Building Groups Panel */}
+      {showGroupPanel && (
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          left: '20px',
+          background: 'rgba(255,255,255,0.95)',
+          backdropFilter: 'blur(10px)',
+          borderRadius: '12px',
+          padding: '20px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+          zIndex: 1000,
+          minWidth: '300px',
+          maxWidth: '400px',
+          maxHeight: '80vh',
+          overflowY: 'auto'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0, color: '#1976d2', fontSize: '18px' }}>Building Groups</h3>
+            <button
+              onClick={() => setShowGroupPanel(false)}
+              style={{
+                background: 'none',
+                border: 'none',
+                fontSize: '20px',
+                cursor: 'pointer',
+                color: '#666'
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Create New Group */}
+          <div style={{ marginBottom: '20px', padding: '12px', background: '#f5f5f5', borderRadius: '8px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px' }}>Create New Group</h4>
+            <input
+              type="text"
+              placeholder="Group name"
+              id="new-group-name"
+              style={{
+                width: '100%',
+                padding: '8px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                marginBottom: '8px'
+              }}
+            />
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+              <input
+                type="color"
+                id="new-group-color"
+                defaultValue="#2196f3"
+                style={{ width: '40px', height: '32px', border: 'none', borderRadius: '4px' }}
+              />
+              <button
+                onClick={() => {
+                  const nameInput = document.getElementById('new-group-name') as HTMLInputElement;
+                  const colorInput = document.getElementById('new-group-color') as HTMLInputElement;
+                  if (nameInput && colorInput && nameInput.value.trim()) {
+                    createBuildingGroup(nameInput.value.trim(), colorInput.value);
+                    nameInput.value = '';
+                  }
+                }}
+                style={{
+                  background: '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  padding: '8px 12px',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  flex: 1
+                }}
+              >
+                Create Group
+              </button>
+            </div>
+          </div>
+
+          {/* Existing Groups */}
+          {buildingGroups.map(group => (
+            <div key={group.id} style={{
+              border: '1px solid #ddd',
+              borderRadius: '8px',
+              padding: '12px',
+              marginBottom: '12px',
+              background: group.visible ? 'white' : '#f9f9f9'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <div style={{
+                  width: '16px',
+                  height: '16px',
+                  backgroundColor: group.color,
+                  borderRadius: '3px',
+                  marginRight: '8px'
+                }} />
+                <span style={{ 
+                  fontWeight: 'bold', 
+                  flex: 1,
+                  opacity: group.visible ? 1 : 0.6
+                }}>
+                  {group.name} ({group.buildings.length} buildings)
+                </span>
+                <button
+                  onClick={() => toggleGroupVisibility(group.id)}
+                  style={{
+                    background: group.visible ? '#4CAF50' : '#ccc',
+                    color: 'white',
+                    border: 'none',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    marginRight: '4px',
+                    fontSize: '12px'
+                  }}
+                >
+                  {group.visible ? 'Hide' : 'Show'}
+                </button>
+                <button
+                  onClick={() => deleteBuildingGroup(group.id)}
+                  style={{
+                    background: '#f44336',
+                    color: 'white',
+                    border: 'none',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '12px'
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+              
+              {/* Buildings in this group */}
+              {group.buildings.length > 0 && (
+                <div style={{ fontSize: '12px', color: '#666' }}>
+                  {getBuildingsInGroup(group.id).map(building => (
+                    <div key={building.id} style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+                      <span style={{ flex: 1 }}>{building.name}</span>
+                      <button
+                        onClick={() => removeBuildingFromGroup(building.id)}
+                        style={{
+                          background: '#ff9800',
+                          color: 'white',
+                          border: 'none',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          cursor: 'pointer',
+                          fontSize: '10px'
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+
+          {/* Ungrouped Buildings */}
+          {getUngroupedBuildings().length > 0 && (
+            <div style={{
+              border: '1px solid #ddd',
+              borderRadius: '8px',
+              padding: '12px',
+              marginBottom: '12px'
+            }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px' }}>Ungrouped Buildings</h4>
+              {getUngroupedBuildings().map(building => (
+                <div key={building.id} style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  marginBottom: '4px',
+                  fontSize: '12px'
+                }}>
+                  <span style={{ flex: 1 }}>{building.name}</span>
+                  <select
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        addBuildingToGroup(building.id, e.target.value);
+                      }
+                    }}
+                    style={{
+                      padding: '2px 4px',
+                      fontSize: '10px',
+                      border: '1px solid #ddd',
+                      borderRadius: '3px'
+                    }}
+                  >
+                    <option value="">Add to group...</option>
+                    {buildingGroups.map(group => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Settings Button */}
       <button 
@@ -3330,16 +3599,9 @@ const Map: React.FC<MapProps> = ({
                           if (mapInstance.getLayer(`recording-path-endpoint-end-${line.id}`)) {
                             try { mapInstance.removeLayer(`recording-path-endpoint-end-${line.id}`); } catch (e) { console.error(e); }
                           }
-                          if (mapInstance.getSource(`recording-path-endpoint-end-${line.id}`)) {
-                            try { mapInstance.removeSource(`recording-path-endpoint-end-${line.id}`); } catch (e) { console.error(e); }
-                          }
                         }
-                      } catch (e) {
-                        console.error('Error in line deletion cleanup:', e);
-                      }
+                      } catch (e) { console.error(e); }
                     }
-                    // Remove the line from the state
-                    setRecordingLines(prev => prev.filter(l => l.id !== line.id));
                   }}
                 >
                   Delete
@@ -3349,607 +3611,8 @@ const Map: React.FC<MapProps> = ({
           ))}
         </div>
       </Draggable>
-
-      {/* Model List */}
-      {models3D.length > 0 && (
-        <Draggable nodeRef={modelListRef as React.RefObject<HTMLElement>}>
-          <div ref={modelListRef} className="model-list" style={{
-            position: 'absolute',
-            top: '120px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 1000,
-            background: 'white',
-            padding: '16px',
-            borderRadius: '8px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-            marginTop: showModelImport ? '200px' : '0'
-          }}>
-            <h3 style={{ margin: '0 0 16px 0' }}>Imported Models</h3>
-            {models3D.map(model => (
-              <div key={model.id} style={{ marginBottom: '12px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>{model.name}</span>
-                  <button
-                    onClick={() => setModels3D(models3D.filter(m => m.id !== model.id))}
-                    style={{
-                      background: '#f44336',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      padding: '4px 8px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Draggable>
-      )}
-
-      {isPlacingModel && (
-        <Draggable nodeRef={placingModelRef as React.RefObject<HTMLElement>}>
-          <div ref={placingModelRef} style={{
-            background: 'rgba(0, 0, 0, 0.8)',
-            color: 'white',
-            padding: '16px',
-            borderRadius: '8px',
-            zIndex: 1000
-          }}>
-            Draw an area on the map to place the model
-          </div>
-        </Draggable>
-      )}
-      <style>{`
-        .settings-container {
-          z-index: 1;
-        }
-
-        .settings-button {
-          background: #ffffff;
-          border: none;
-          border-radius: 4px;
-          padding: 8px 16px;
-          font-size: 16px;
-          cursor: pointer;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-          transition: all 0.2s ease;
-        }
-
-        .settings-button:hover {
-          background: #f0f0f0;
-          box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        }
-
-        .settings-modal {
-          background: #ffffff;
-          border-radius: 8px;
-          padding: 16px;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-          min-width: 200px;
-        }
-
-        .settings-section {
-          margin-bottom: 16px;
-          background: #ffffff;
-        }
-
-        .settings-section:last-child {
-          margin-bottom: 0;
-        }
-
-        .settings-section h3 {
-          margin: 0 0 8px 0;
-          font-size: 14px;
-          color: #666;
-        }
-
-        .style-button,
-        .feature-button {
-          display: block;
-          width: 100%;
-          padding: 8px 12px;
-          margin: 4px 0;
-          border: 1px solid #e0e0e0;
-          border-radius: 4px;
-          background: #ffffff;
-          cursor: pointer;
-          text-align: left;
-          transition: all 0.2s ease;
-        }
-
-        .style-button:hover,
-        .feature-button:hover {
-          background: #f0f0f0;
-        }
-
-        .style-button.active,
-        .feature-button.active {
-          background: #2196f3;
-          border-color: #1976d2;
-          color: #ffffff;
-        }
-
-        .design-building-button {
-          background: #2196f3;
-          color: white;
-          border: none;
-          border-radius: 4px;
-          padding: 8px 16px;
-          font-size: 16px;
-          cursor: pointer;
-          margin-bottom: 10px;
-        }
-        .design-building-button:disabled {
-          background: #b0b0b0;
-          cursor: not-allowed;
-        }
-        .cube-slider-container {
-          z-index: 3;
-          background: white;
-          padding: 10px 16px;
-          border-radius: 8px;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-          font-size: 15px;
-          min-width: 260px;
-        }
-        .import-model-button {
-          zIndex: 2;
-          background: #4CAF50;
-          color: white;
-          border: none;
-          borderRadius: 4px;
-          padding: 8px 16px;
-          fontSize: 16px;
-          cursor: pointer;
-        }
-        .model-import-modal {
-          background: white;
-          padding: 16px;
-          borderRadius: 8px;
-          boxShadow: 0 2px 8px rgba(0,0,0,0.15);
-        }
-        .model-list {
-          z-index: 3;
-          background: white;
-          padding: 16px;
-          borderRadius: 8px;
-          boxShadow: 0 2px 8px rgba(0,0,0,0.15);
-          marginTop: showModelImport ? '200px' : 0;
-        }
-        .film-controls button:hover {
-          opacity: 0.9;
-        }
-
-        .timeline-panel input[type="range"] {
-          width: 200px;
-        }
-
-        .timeline-panel select {
-          background: #333;
-          color: white;
-          border: 1px solid #555;
-          padding: 4px 8px;
-          border-radius: 4px;
-        }
-
-        .actor-panel, .effects-panel {
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-        }
-      `}</style>
-      {showSettings && (
-        <Draggable nodeRef={settingsContainerRef as React.RefObject<HTMLElement>}>
-          <div ref={settingsContainerRef} className="settings-panel" style={{
-            position: 'absolute',
-            top: '80px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'white',
-            padding: '20px',
-            borderRadius: '8px',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-            zIndex: 1000,
-            minWidth: '250px',
-            maxHeight: '70vh',
-            overflowY: 'auto'
-          }}>
-            <h3 style={{ margin: '0 0 16px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span>World Layout</span>
-              <button
-                onClick={() => setShowSettings(false)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  fontSize: 22,
-                  color: '#888',
-                  cursor: 'pointer',
-                  borderRadius: 6,
-                  padding: 4,
-                  marginLeft: 12,
-                  transition: 'background 0.15s',
-                  lineHeight: 1
-                }}
-                title="Close"
-              >
-                ×
-              </button>
-            </h3>
-            <div style={{ marginBottom: '20px' }}>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Map Style</h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {mapStyles.map(mapStyle => (
-                  <button
-                    key={mapStyle.id}
-                    onClick={() => changeMapStyle(mapStyle.id)}
-                    style={{
-                      padding: '8px 12px',
-                      border: '1px solid #e0e0e0',
-                      borderRadius: '4px',
-                      background: style === mapStyle.id ? '#2196f3' : '#ffffff',
-                      color: style === mapStyle.id ? '#ffffff' : '#333',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    {mapStyle.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div style={{ marginBottom: '20px' }}>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>3D Features</h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {layers3D.map(layer => (
-                  <button
-                    key={layer.id}
-                    onClick={() => toggle3DLayer(layer.id)}
-                    style={{
-                      padding: '8px 12px',
-                      border: '1px solid #e0e0e0',
-                      borderRadius: '4px',
-                      background: layer.enabled ? '#2196f3' : '#ffffff',
-                      color: layer.enabled ? '#ffffff' : '#333',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    {layer.name}
-                  </button>
-                ))}
-                <button
-                  onClick={refresh3DFeatures}
-                  style={{
-                    padding: '8px 12px',
-                    border: '1px solid #e0e0e0',
-                    borderRadius: '4px',
-                    background: '#4CAF50',
-                    color: '#ffffff',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    transition: 'all 0.2s ease',
-                    fontSize: '12px'
-                  }}
-                >
-                  🔄 Refresh 3D Features
-                </button>
-              </div>
-            </div>
-            <div>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Labels</h4>
-              <button
-                onClick={toggleLabels}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #e0e0e0',
-                  borderRadius: '4px',
-                  background: showLabels ? '#2196f3' : '#ffffff',
-                  color: showLabels ? '#ffffff' : '#333',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  transition: 'all 0.2s ease',
-                  width: '100%'
-                }}
-              >
-                {showLabels ? 'Hide Labels' : 'Show Labels'}
-              </button>
-            </div>
-            <div style={{ marginTop: '20px' }}>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>World Building Color</h4>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <input
-                  type="color"
-                  value={worldBuildingColor}
-                  onChange={(e) => changeWorldBuildingColor(e.target.value)}
-                  style={{ 
-                    width: '50px', 
-                    height: '40px', 
-                    border: 'none', 
-                    borderRadius: '4px',
-                    cursor: 'pointer'
-                  }}
-                />
-                <span style={{ color: '#666', fontSize: '14px' }}>{worldBuildingColor}</span>
-              </div>
-              <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
-                Change the color of all 3D buildings in the world
-              </div>
-            </div>
-            <div style={{ marginTop: '20px' }}>
-              <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#666' }}>Terrain Exaggeration</h4>
-              <input
-                type="range"
-                min={0.1}
-                max={3}
-                step={0.01}
-                value={terrainExaggeration}
-                onChange={e => {
-                  const value = parseFloat(e.target.value);
-                  setTerrainExaggeration(value);
-                  if (map.current && map.current.getTerrain()) {
-                    map.current.setTerrain({
-                      source: 'mapbox-dem',
-                      exaggeration: value
-                    });
-                  }
-                }}
-                style={{ width: '100%' }}
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#888' }}>
-                <span>0.1x</span>
-                <span>{terrainExaggeration.toFixed(2)}x</span>
-                <span>3x</span>
-              </div>
-            </div>
-
-            {/* Building Replacements Section */}
-            <div style={{ marginBottom: '20px', borderTop: '1px solid #e0e0e0', paddingTop: '16px' }}>
-              <h4 style={{ margin: '0 0 12px 0', color: '#333' }}>Building Replacements</h4>
-              <p style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
-                Replace specific buildings with custom 3D models
-              </p>
-              
-              <button
-                onClick={() => setShowBuildingReplacement(!showBuildingReplacement)}
-                style={{
-                  background: '#f0f0f0',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  padding: '8px 12px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  marginBottom: '12px'
-                }}
-              >
-                {showBuildingReplacement ? 'Hide' : 'Add'} Building Replacement
-              </button>
-
-              <button
-                onClick={debugLayers}
-                style={{
-                  background: '#ffc107',
-                  border: '1px solid #e0a800',
-                  borderRadius: '4px',
-                  padding: '6px 10px',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                  marginBottom: '12px',
-                  marginLeft: '8px'
-                }}
-                title="Debug: List available layers in console"
-              >
-                🐛 Debug Layers
-              </button>
-
-              {showBuildingReplacement && (
-                <div style={{ 
-                  background: '#f9f9f9', 
-                  padding: '12px', 
-                  borderRadius: '4px',
-                  marginBottom: '12px'
-                }}>
-                  <div style={{ marginBottom: '8px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
-                      Building Name (e.g., &quot;Transamerica Pyramid&quot;):
-                    </label>
-                    <input
-                      type="text"
-                      value={selectedReplacementBuilding}
-                      onChange={(e) => setSelectedReplacementBuilding(e.target.value)}
-                      placeholder="Enter building name"
-                      style={{
-                        width: '100%',
-                        padding: '6px',
-                        border: '1px solid #ccc',
-                        borderRadius: '3px',
-                        fontSize: '12px'
-                      }}
-                    />
-                  </div>
-
-                  <div style={{ marginBottom: '8px' }}>
-                    <button
-                      onClick={handleBuildingSelection}
-                      disabled={isSelectingBuilding}
-                      style={{
-                        background: isSelectingBuilding ? '#ccc' : '#28a745',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '3px',
-                        padding: '6px 12px',
-                        cursor: isSelectingBuilding ? 'not-allowed' : 'pointer',
-                        fontSize: '12px',
-                        width: '100%',
-                        marginBottom: '8px'
-                      }}
-                    >
-                      {isSelectingBuilding ? 'Click on a building...' : 'Select Building on Map'}
-                    </button>
-                    {selectedBuildingCoords && (
-                      <div style={{ 
-                        background: '#e8f5e8', 
-                        padding: '6px', 
-                        borderRadius: '3px', 
-                        fontSize: '11px',
-                        color: '#155724',
-                        marginBottom: '8px'
-                      }}>
-                        Selected: {selectedBuildingName}
-                        <br />
-                        Coordinates: {selectedBuildingCoords[0].toFixed(4)}, {selectedBuildingCoords[1].toFixed(4)}
-                        <button
-                          onClick={cancelBuildingSelection}
-                          style={{
-                            background: '#dc3545',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '2px',
-                            padding: '2px 6px',
-                            cursor: 'pointer',
-                            fontSize: '10px',
-                            marginLeft: '8px'
-                          }}
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  <div style={{ marginBottom: '8px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
-                      3D Model File (GLTF/GLB):
-                    </label>
-                    <input
-                      ref={buildingReplacementFileRef}
-                      type="file"
-                      accept=".gltf,.glb"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setReplacementModelUrl(URL.createObjectURL(file));
-                        }
-                      }}
-                      style={{ fontSize: '12px' }}
-                    />
-                  </div>
-
-                  <div style={{ marginBottom: '8px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
-                      Scale: {replacementScale}x
-                    </label>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max="10"
-                      step="0.1"
-                      value={replacementScale}
-                      onChange={(e) => setReplacementScale(parseFloat(e.target.value))}
-                      style={{ width: '100%' }}
-                    />
-                  </div>
-
-                  <div style={{ marginBottom: '8px' }}>
-                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px' }}>
-                      Rotation: {replacementRotation}°
-                    </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="360"
-                      step="1"
-                      value={replacementRotation}
-                      onChange={(e) => setReplacementRotation(parseInt(e.target.value))}
-                      style={{ width: '100%' }}
-                    />
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      if (selectedReplacementBuilding && replacementModelUrl) {
-                        const newReplacement = {
-                          id: `replacement-${Date.now()}`,
-                          buildingName: selectedReplacementBuilding,
-                          modelUrl: replacementModelUrl,
-                          position: selectedBuildingCoords || [-122.4034, 37.7952] as [number, number], // Use selected coordinates or default
-                          scale: replacementScale,
-                          rotation: replacementRotation
-                        };
-                        setBuildingReplacements(prev => [...prev, newReplacement]);
-                        setSelectedReplacementBuilding('');
-                        setReplacementModelUrl('');
-                        setReplacementScale(1);
-                        setReplacementRotation(0);
-                        if (buildingReplacementFileRef.current) {
-                          buildingReplacementFileRef.current.value = '';
-                        }
-                      }
-                    }}
-                    style={{
-                      background: '#007bff',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      padding: '6px 12px',
-                      cursor: 'pointer',
-                      fontSize: '12px'
-                    }}
-                  >
-                    Add Replacement
-                  </button>
-                </div>
-              )}
-
-              {/* List of existing replacements */}
-              {buildingReplacements.length > 0 && (
-                <div>
-                  <h5 style={{ margin: '8px 0', fontSize: '14px' }}>Current Replacements:</h5>
-                  {buildingReplacements.map((replacement) => (
-                    <div key={replacement.id} style={{
-                      background: '#fff',
-                      border: '1px solid #ddd',
-                      borderRadius: '4px',
-                      padding: '8px',
-                      marginBottom: '6px',
-                      fontSize: '12px'
-                    }}>
-                      <div style={{ fontWeight: 'bold' }}>{replacement.buildingName}</div>
-                      <div style={{ color: '#666', fontSize: '11px' }}>
-                        Scale: {replacement.scale}x | Rotation: {replacement.rotation}°
-                      </div>
-                      <button
-                        onClick={() => {
-                          setBuildingReplacements(prev => 
-                            prev.filter(r => r.id !== replacement.id)
-                          );
-                        }}
-                        style={{
-                          background: '#dc3545',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '3px',
-                          padding: '4px 8px',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                          marginTop: '4px'
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </Draggable>
-      )}
     </div>
   );
 };
 
-export default Map; 
+export default Map;
