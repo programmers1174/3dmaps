@@ -168,7 +168,7 @@ const Map: React.FC<MapProps> = ({
   const [isCloudNext, setIsCloudNext] = useState(false);
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
-  const [fogColor, setFogColor] = useState('#87CEEB'); // Default afternoon sky color for fog/sky
+  const [fogColor, setFogColor] = useState('#80dbff'); // Default sky color for fog/sky
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -526,8 +526,8 @@ const Map: React.FC<MapProps> = ({
             'interpolate',
             ['linear'],
             ['sky-radial-progress'],
-            0.0, fogColor, // fog color
-            1.0, fogColor  // fog color
+            0.0, fogColor, // sky color
+            1.0, fogColor  // sky color
           ],
           'sky-opacity': 1.0
         } as any
@@ -535,7 +535,7 @@ const Map: React.FC<MapProps> = ({
       
       // Ensure solid blue sky with no fog effects
       
-      // Set the background color to match the fog color
+      // Set the background color to match the sky color
       if (currentMap.getLayer('background')) {
         currentMap.setPaintProperty('background', 'background-color', fogColor);
       } else {
@@ -544,6 +544,13 @@ const Map: React.FC<MapProps> = ({
           'type': 'background',
           'paint': { 'background-color': fogColor }
         }, 'sky');
+      }
+
+      // Remove fog completely on initialization
+      try {
+        currentMap.setFog(null);
+      } catch (e) {
+        console.log('Could not remove fog on initialization');
       }
     } catch (e) {
       console.error("Error adding sky layer:", e);
@@ -687,6 +694,14 @@ const Map: React.FC<MapProps> = ({
       initializeLayers();
     }
   }, [initializeLayers]);
+
+  // Apply default fog color when map is ready
+  useEffect(() => {
+    if (map.current && map.current.isStyleLoaded()) {
+      console.log('Applying default fog color');
+      changeFogColor(fogColor);
+    }
+  }, [map.current, fogColor]);
 
   // Function to handle model import
   const handleModelImport = () => {
