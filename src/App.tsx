@@ -10,7 +10,7 @@ const App: React.FC = () => {
       <Map 
         accessToken={MAPBOX_ACCESS_TOKEN}
         initialZoom={15}
-        initialStyle="mapbox://styles/mapbox/streets-v12"
+        initialStyle="mapbox://styles/mapbox/satellite-streets-v12"
       />
     </div>
   );

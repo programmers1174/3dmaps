@@ -103,7 +103,7 @@ const Map: React.FC<MapProps> = ({
   accessToken,
   initialCoordinates = [-122.4194, 37.7749], // San Francisco
   initialZoom = 15,
-  initialStyle = 'mapbox://styles/mapbox/streets-v12'
+  initialStyle = 'mapbox://styles/mapbox/satellite-streets-v12'
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -342,13 +342,43 @@ const Map: React.FC<MapProps> = ({
   const changeWorldBuildingColor = (newColor: string) => {
     console.log('Changing world building color to:', newColor);
     setWorldBuildingColor(newColor);
-    // Only reinitialize layers to update building color, do not touch sky or background
+    
+    // Update building colors immediately without reinitializing everything
     if (map.current && map.current.isStyleLoaded()) {
-      setTimeout(() => {
-        // Only update building layers, not sky/background
-        // So just call initializeLayers as before, but ensure initializeLayers does not use worldBuildingColor for sky/background
-        initializeLayers();
-      }, 100);
+      try {
+        const isSatellite = style.includes('satellite');
+        
+        // List of all possible building layer names to check
+        const buildingLayerNames = [
+          '3d-buildings',
+          '3d-buildings-simple', 
+          '3d-buildings-fallback',
+          'building',
+          'building-extrusion'
+        ];
+        
+        // Update all existing building layers
+        buildingLayerNames.forEach(layerName => {
+          if (map.current!.getLayer(layerName)) {
+            console.log(`Updating layer: ${layerName}`);
+            
+            // Always use the new color, regardless of satellite style
+            map.current!.setPaintProperty(layerName, 'fill-extrusion-color', newColor);
+          }
+        });
+        
+        // Force a repaint to ensure changes are visible
+        map.current.triggerRepaint();
+        
+        console.log('Building colors updated immediately');
+      } catch (error) {
+        console.error('Error updating building colors:', error);
+        // Fallback: reinitialize layers if direct update fails
+        console.log('Falling back to layer reinitialization');
+        setTimeout(() => {
+          initializeLayers();
+        }, 100);
+      }
     }
   };
 
@@ -551,25 +581,7 @@ const Map: React.FC<MapProps> = ({
               'visibility': 'visible'
             },
             'paint': {
-              'fill-extrusion-color': isSatellite ? [
-                'interpolate',
-                ['linear'],
-                ['get', 'height'],
-                0, '#e6e6e6',
-                50, '#d4d4d4',
-                100, '#c2c2c2',
-                200, '#b0b0b0',
-                400, '#9e9e9e'
-              ] : [
-                'interpolate',
-                ['linear'],
-                ['get', 'height'],
-                0, worldBuildingColor,
-                50, worldBuildingColor,
-                100, worldBuildingColor,
-                200, worldBuildingColor,
-                400, worldBuildingColor
-              ],
+              'fill-extrusion-color': worldBuildingColor,
               'fill-extrusion-height': ['get', 'height'],
               'fill-extrusion-base': ['get', 'min_height'],
               'fill-extrusion-opacity': 1.0,
@@ -593,7 +605,7 @@ const Map: React.FC<MapProps> = ({
               'visibility': 'visible'
             },
             'paint': {
-              'fill-extrusion-color': isSatellite ? '#d4d4d4' : worldBuildingColor,
+              'fill-extrusion-color': worldBuildingColor,
               'fill-extrusion-height': ['get', 'height'],
               'fill-extrusion-base': ['get', 'min_height'],
               'fill-extrusion-opacity': 1.0,
@@ -1555,7 +1567,7 @@ const Map: React.FC<MapProps> = ({
 
     const mapInstance = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/satellite-streets-v12',
+      style: initialStyle,
       center: [-122.431297, 37.773972], // San Francisco downtown
       zoom: 15,
       pitch: 40,
@@ -3755,10 +3767,36 @@ const Map: React.FC<MapProps> = ({
                 borderRadius: '4px',
                 cursor: 'pointer',
                 fontSize: '14px',
-                width: '100%'
+                width: '100%',
+                marginBottom: '8px'
               }}
             >
               Refresh 3D Features
+            </button>
+            <button
+              onClick={() => {
+                if (map.current) {
+                  console.log('Available layers:');
+                  const layers = map.current.getStyle().layers;
+                  layers?.forEach(layer => {
+                    if (layer.type === 'fill-extrusion') {
+                      console.log(`- ${layer.id} (${layer.type})`);
+                    }
+                  });
+                }
+              }}
+              style={{
+                background: '#2196f3',
+                color: 'white',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                width: '100%'
+              }}
+            >
+              Debug Layers
             </button>
           </div>
 
