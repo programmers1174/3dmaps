@@ -168,6 +168,7 @@ const Map: React.FC<MapProps> = ({
   const [isCloudNext, setIsCloudNext] = useState(false);
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
+  const [fogColor, setFogColor] = useState('#7ec8e3'); // Default blue color for fog/sky
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -382,6 +383,44 @@ const Map: React.FC<MapProps> = ({
     }
   };
 
+  const changeFogColor = (newColor: string) => {
+    console.log('Changing fog color to:', newColor);
+    setFogColor(newColor);
+    
+    // Update fog/sky colors immediately
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        // Update sky layer color
+        if (map.current.getLayer('sky')) {
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, newColor,
+            1.0, newColor
+          ]);
+        }
+        
+        // Update background color
+        if (map.current.getLayer('background')) {
+          map.current.setPaintProperty('background', 'background-color', newColor);
+        }
+        
+        // Force a repaint to ensure changes are visible
+        map.current.triggerRepaint();
+        
+        console.log('Fog colors updated immediately');
+      } catch (error) {
+        console.error('Error updating fog colors:', error);
+        // Fallback: reinitialize layers if direct update fails
+        console.log('Falling back to layer reinitialization');
+        setTimeout(() => {
+          initializeLayers();
+        }, 100);
+      }
+    }
+  };
+
   const refresh3DFeatures = () => {
     console.log('Manually refreshing 3D features');
     if (map.current && map.current.isStyleLoaded()) {
@@ -480,8 +519,8 @@ const Map: React.FC<MapProps> = ({
             'interpolate',
             ['linear'],
             ['sky-radial-progress'],
-            0.0, '#7ec8e3', // solid blue
-            1.0, '#7ec8e3'  // solid blue
+            0.0, fogColor, // fog color
+            1.0, fogColor  // fog color
           ],
           'sky-opacity': 1.0
         } as any
@@ -489,14 +528,14 @@ const Map: React.FC<MapProps> = ({
       
       // Ensure solid blue sky with no fog effects
       
-      // Set the background color to match the solid blue
+      // Set the background color to match the fog color
       if (currentMap.getLayer('background')) {
-        currentMap.setPaintProperty('background', 'background-color', '#7ec8e3');
+        currentMap.setPaintProperty('background', 'background-color', fogColor);
       } else {
         currentMap.addLayer({
           'id': 'background',
           'type': 'background',
-          'paint': { 'background-color': '#7ec8e3' }
+          'paint': { 'background-color': fogColor }
         }, 'sky');
       }
     } catch (e) {
@@ -632,7 +671,7 @@ const Map: React.FC<MapProps> = ({
 
     // Start the terrain and building addition process
     addTerrainAndBuildings();
-  }, [layers3D, style, worldBuildingColor, terrainExaggeration]);
+  }, [layers3D, style, worldBuildingColor, terrainExaggeration, fogColor]);
 
   // Add this useEffect to ensure layers are initialized when the map is ready
   useEffect(() => {
@@ -1439,7 +1478,7 @@ const Map: React.FC<MapProps> = ({
         type: 'fill-extrusion',
         source: `recording-path-${line.id}`,
         paint: {
-          'fill-extrusion-color': '#ff0000',
+          'fill-extrusion-color': 'worldBuildingColor',
           'fill-extrusion-height': lineHeight,
           'fill-extrusion-base': lineHeight,
           'fill-extrusion-opacity': 1,
@@ -3752,6 +3791,27 @@ const Map: React.FC<MapProps> = ({
                 }}
               />
               <span style={{ color: '#666', fontSize: '14px' }}>{worldBuildingColor}</span>
+            </div>
+          </div>
+
+          {/* Fog Color */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Fog/Sky Color</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="color"
+                value={fogColor}
+                onChange={(e) => changeFogColor(e.target.value)}
+                style={{
+                  width: '50px',
+                  height: '40px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
+                }}
+              />
+              <span style={{ color: '#666', fontSize: '14px' }}>{fogColor}</span>
             </div>
           </div>
 
