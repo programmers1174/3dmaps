@@ -492,7 +492,7 @@ const Map: React.FC<MapProps> = ({
 
           currentMap.setTerrain({
             'source': 'mapbox-dem',
-            'exaggeration': 1
+            'exaggeration': terrainExaggeration
           });
 
           currentMap.addLayer({
@@ -620,7 +620,7 @@ const Map: React.FC<MapProps> = ({
 
     // Start the terrain and building addition process
     addTerrainAndBuildings();
-  }, [layers3D, style, worldBuildingColor]);
+  }, [layers3D, style, worldBuildingColor, terrainExaggeration]);
 
   // Add this useEffect to ensure layers are initialized when the map is ready
   useEffect(() => {
@@ -1700,7 +1700,7 @@ const Map: React.FC<MapProps> = ({
       setIsDrawing(false);
       const feature = e.features[0];
       const id = feature.id || `${Date.now()}-${Math.random()}`;
-
+      
       // Calculate center point of the drawn area
       const coordinates = feature.geometry.coordinates[0];
       const center = coordinates.reduce(
@@ -1723,7 +1723,7 @@ const Map: React.FC<MapProps> = ({
       );
       const width = Math.abs(bounds.maxX - bounds.minX);
       const length = Math.abs(bounds.maxY - bounds.minY);
-
+      
       // Always create a building (not a cloud) with correct properties
       const newBuilding = {
         id,
@@ -1740,8 +1740,8 @@ const Map: React.FC<MapProps> = ({
         height: buildingProperties.height,
         name: buildingProperties.name || `Building ${buildings.length + 1}`,
         color: buildingProperties.color,
-        position: center,
-        width,
+            position: center,
+            width,
         length,
         isCloud: false,
         base: 0
@@ -1753,8 +1753,8 @@ const Map: React.FC<MapProps> = ({
       });
 
       // Remove the drawn feature from Mapbox Draw so only the 3D extrusion remains
-      if (draw) {
-        draw.delete(feature.id);
+        if (draw) {
+          draw.delete(feature.id);
       }
     });
 
@@ -2124,7 +2124,7 @@ const Map: React.FC<MapProps> = ({
 
       map.current.setTerrain({
         'source': 'mapbox-dem',
-        'exaggeration': 1
+        'exaggeration': terrainExaggeration
       });
     } catch (error) {
       console.error('Error initializing terrain:', error);
@@ -2208,7 +2208,7 @@ const Map: React.FC<MapProps> = ({
         };
 
         // Add the building to the map
-        addBuildingToMap(newBuilding);
+          addBuildingToMap(newBuilding);
         
         // Delete the drawn polygon
         draw.delete(feature.id);
@@ -2754,6 +2754,23 @@ const Map: React.FC<MapProps> = ({
     setSelectedBuildingsForGroup([]);
   };
 
+  // Effect to handle terrain exaggeration changes
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    const terrain = map.current.getTerrain();
+    if (terrain) {
+      try {
+        map.current.setTerrain({
+          source: 'mapbox-dem',
+          exaggeration: terrainExaggeration
+        });
+      } catch (error) {
+        console.error('Error updating terrain exaggeration:', error);
+      }
+    }
+  }, [terrainExaggeration]);
+
   // Add this effect after the buildings state is defined
   useEffect(() => {
     if (!map.current || !map.current.isStyleLoaded()) return;
@@ -2788,16 +2805,16 @@ const Map: React.FC<MapProps> = ({
         // Set minimum height
         const height = b.height && b.height > 0 ? b.height : 1;
         return {
-          type: 'Feature',
+        type: 'Feature',
           geometry: {
             type: 'Polygon',
             coordinates: [coords]
           },
-          properties: {
+        properties: {
             height,
-            color: b.color || '#ffffff',
-            base: b.base || 0
-          }
+          color: b.color || '#ffffff',
+          base: b.base || 0
+        }
         };
       });
     // Debug log
@@ -3601,7 +3618,7 @@ const Map: React.FC<MapProps> = ({
                           }
                         }
                       } catch (e) { console.error(e); }
-                    }
+                          }
                   }}
                 >
                   Delete
@@ -3611,8 +3628,162 @@ const Map: React.FC<MapProps> = ({
           ))}
         </div>
       </Draggable>
+
+      {/* Building Creation Panel */}
+      {showBuildingCreationPanel && renderBuildingCreationPanel()}
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          left: '20px',
+          background: 'rgba(255,255,255,0.95)',
+          backdropFilter: 'blur(10px)',
+          borderRadius: '12px',
+          padding: '20px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.1)',
+          zIndex: 1000,
+          minWidth: '300px',
+          maxWidth: '400px',
+          maxHeight: '80vh',
+          overflowY: 'auto'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0, color: '#1976d2', fontSize: '18px' }}>World Layout Settings</h3>
+            <button
+              onClick={() => setShowSettings(false)}
+              style={{
+                background: 'none',
+                border: 'none',
+                fontSize: '20px',
+                cursor: 'pointer',
+                color: '#666'
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Map Style Selection */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Map Style</h4>
+            <select
+              value={style}
+              onChange={(e) => changeMapStyle(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                fontSize: '14px'
+              }}
+            >
+              {mapStyles.map(mapStyle => (
+                <option key={mapStyle.id} value={mapStyle.id}>
+                  {mapStyle.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 3D Layer Controls */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>3D Features</h4>
+            {layers3D.map(layer => (
+              <div key={layer.id} style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <input
+                  type="checkbox"
+                  id={layer.id}
+                  checked={layer.enabled}
+                  onChange={() => toggle3DLayer(layer.id)}
+                  style={{ marginRight: '8px' }}
+                />
+                <label htmlFor={layer.id} style={{ fontSize: '14px', cursor: 'pointer' }}>
+                  {layer.name}
+                </label>
+              </div>
+            ))}
+          </div>
+
+          {/* Label Toggle */}
+          <div style={{ marginBottom: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+              <input
+                type="checkbox"
+                id="show-labels"
+                checked={showLabels}
+                onChange={toggleLabels}
+                style={{ marginRight: '8px' }}
+              />
+              <label htmlFor="show-labels" style={{ fontSize: '14px', cursor: 'pointer' }}>
+                Show Map Labels
+              </label>
+            </div>
+          </div>
+
+          {/* World Building Color */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>World Building Color</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="color"
+                value={worldBuildingColor}
+                onChange={(e) => changeWorldBuildingColor(e.target.value)}
+                style={{
+                  width: '50px',
+                  height: '40px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
+                }}
+              />
+              <span style={{ color: '#666', fontSize: '14px' }}>{worldBuildingColor}</span>
+            </div>
+          </div>
+
+          {/* Refresh Button */}
+          <div style={{ marginBottom: '20px' }}>
+            <button
+              onClick={refresh3DFeatures}
+              style={{
+                background: '#4CAF50',
+                color: 'white',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                width: '100%'
+              }}
+            >
+              Refresh 3D Features
+            </button>
+          </div>
+
+          {/* Terrain Exaggeration */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Terrain Exaggeration</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="range"
+                min="0.1"
+                max="3"
+                step="0.1"
+                value={terrainExaggeration}
+                onChange={(e) => setTerrainExaggeration(Number(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#666', fontSize: '14px', minWidth: '40px' }}>
+                {terrainExaggeration}x
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-export default Map;
+export default Map; 
