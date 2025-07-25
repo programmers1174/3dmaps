@@ -168,7 +168,7 @@ const Map: React.FC<MapProps> = ({
   const [isCloudNext, setIsCloudNext] = useState(false);
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
-  const [fogColor, setFogColor] = useState('#7ec8e3'); // Default blue color for fog/sky
+  const [fogColor, setFogColor] = useState('#87CEEB'); // Default afternoon sky color for fog/sky
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -404,6 +404,13 @@ const Map: React.FC<MapProps> = ({
         // Update background color
         if (map.current.getLayer('background')) {
           map.current.setPaintProperty('background', 'background-color', newColor);
+        }
+        
+        // Completely remove fog/atmospheric haze
+        try {
+          map.current.setFog(null);
+        } catch (e) {
+          console.log('Could not remove fog effects');
         }
         
         // Force a repaint to ensure changes are visible
