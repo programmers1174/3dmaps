@@ -168,7 +168,14 @@ const Map: React.FC<MapProps> = ({
   const [isCloudNext, setIsCloudNext] = useState(false);
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
-  const [fogColor, setFogColor] = useState('#80dbff'); // Default sky color for fog/sky
+  const [fogColor, setFogColor] = useState('#1E3A8A'); // Default sky color for fog/sky
+  const [skyGradient, setSkyGradient] = useState<'blue' | 'sunset' | 'night'>('blue');
+  const [dayNightCycle, setDayNightCycle] = useState(true);
+  const [cycleTime, setCycleTime] = useState(0); // 0-24 seconds
+  const [transitionProgress, setTransitionProgress] = useState(0); // 0-1 for smooth transitions
+  const [isSlideshowMode, setIsSlideshowMode] = useState(false); // Default to blue gradient
+
+
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -383,6 +390,294 @@ const Map: React.FC<MapProps> = ({
     }
   };
 
+  const generateStars = () => {
+    const stars: any[] = [];
+    for (let i = 0; i < 200; i++) {
+      stars.push({
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [
+            -122.4194 + (Math.random() - 0.5) * 0.1, // Random longitude around San Francisco
+            37.7749 + (Math.random() - 0.5) * 0.1   // Random latitude around San Francisco
+          ]
+        },
+        properties: {
+          id: `star-${i}`,
+          size: Math.random() * 0.5 + 0.5 // Random size between 0.5 and 1
+        }
+      });
+    }
+    return {
+      type: 'FeatureCollection' as const,
+      features: stars
+    };
+  };
+
+
+
+  const getSkyGradientColors = (gradientType: 'blue' | 'sunset' | 'night') => {
+    if (gradientType === 'blue') {
+      return {
+        top: '#1E3A8A',    // Dark blue
+        middle: '#3B82F6', // Medium blue
+        bottom: '#A9D4FF'  // Light blue
+      };
+    } else if (gradientType === 'sunset') {
+      return {
+        top: '#00008B',    // Very light desaturated pinkish-purple at top
+        middle1: '#00008B', // Soft pink/light peach
+        middle2: '#00008B', // Warm soft orange/peach
+        bottom: '#D89060'  // Deeper muted orange-brown at horizon
+      };
+    } else {
+      return {
+        top: '#000000',    // Pure black
+        middle1: '#000000', // Pure black
+        middle2: '#301934', // Pure black
+        bottom: '#301934'  // Pure black
+      };
+    }
+  };
+
+
+
+  const addStars = () => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        // Remove existing stars first
+        if (map.current.getLayer('stars')) {
+          map.current.removeLayer('stars');
+        }
+        if (map.current.getSource('stars')) {
+          map.current.removeSource('stars');
+        }
+        
+        // Add stars
+        map.current.addSource('stars', {
+          type: 'geojson',
+          data: generateStars()
+        });
+        map.current.addLayer({
+          id: 'stars',
+          type: 'symbol',
+          source: 'stars',
+          layout: {
+            'text-field': '⭐',
+            'text-size': ['get', 'size'],
+            'text-allow-overlap': true,
+            'text-ignore-placement': true
+          },
+          paint: {
+            'text-color': '#FFFFFF',
+            'text-halo-color': '#FFFFFF',
+            'text-halo-width': 0.5
+          }
+        });
+      } catch (error) {
+        console.error('Error adding stars:', error);
+      }
+    }
+  };
+
+  const removeStars = () => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        if (map.current.getLayer('stars')) {
+          map.current.removeLayer('stars');
+        }
+        if (map.current.getSource('stars')) {
+          map.current.removeSource('stars');
+        }
+      } catch (error) {
+        console.error('Error removing stars:', error);
+      }
+    }
+  };
+
+
+
+  const startDayNightCycle = () => {
+    setDayNightCycle(true);
+    setCycleTime(0);
+  };
+
+  const stopDayNightCycle = () => {
+    setDayNightCycle(false);
+    setCycleTime(0);
+  };
+
+  const toggleSlideshowMode = () => {
+    setIsSlideshowMode(!isSlideshowMode);
+  };
+
+  // Toggle map interactions and controls based on slideshow mode
+  useEffect(() => {
+    if (map.current) {
+      if (isSlideshowMode) {
+        // Disable all map interactions in slideshow mode
+        map.current.dragPan.disable();
+        map.current.dragRotate.disable();
+        map.current.scrollZoom.disable();
+        map.current.touchZoomRotate.disable();
+        map.current.keyboard.disable();
+        map.current.doubleClickZoom.disable();
+        map.current.boxZoom.disable();
+        
+        // Remove draw control if it exists
+        if (draw) {
+          map.current.removeControl(draw);
+        }
+      } else {
+        // Enable all map interactions in editor mode
+        map.current.dragPan.enable();
+        map.current.dragRotate.enable();
+        map.current.scrollZoom.enable();
+        map.current.touchZoomRotate.enable();
+        map.current.keyboard.enable();
+        map.current.doubleClickZoom.enable();
+        map.current.boxZoom.enable();
+        
+        // Add draw control back if it doesn't exist
+        if (!draw) {
+          const drawInstance = new (MapboxDraw as any)({
+            displayControlsDefault: false,
+            controls: { polygon: false, trash: false },
+            modes: {
+              ...(MapboxDraw as any).modes,
+              draw_polygon: FreehandMode
+            }
+          });
+          map.current.addControl(drawInstance, 'top-left');
+          setDraw(drawInstance);
+        }
+      }
+    }
+  }, [isSlideshowMode]);
+
+  const interpolateColors = (color1: string, color2: string, progress: number) => {
+    // Convert hex to RGB
+    const hexToRgb = (hex: string) => {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return result ? {
+        r: parseInt(result[1], 16),
+        g: parseInt(result[2], 16),
+        b: parseInt(result[3], 16)
+      } : null;
+    };
+
+    // Convert RGB to hex
+    const rgbToHex = (r: number, g: number, b: number) => {
+      return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+    };
+
+    const rgb1 = hexToRgb(color1);
+    const rgb2 = hexToRgb(color2);
+
+    if (!rgb1 || !rgb2) return color1;
+
+    const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * progress);
+    const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * progress);
+    const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * progress);
+
+    return rgbToHex(r, g, b);
+  };
+
+  const applySmoothSkyTransition = (fromGradient: 'blue' | 'sunset' | 'night', toGradient: 'blue' | 'sunset' | 'night', progress: number) => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        const fromColors = getSkyGradientColors(fromGradient);
+        const toColors = getSkyGradientColors(toGradient);
+
+        const interpolatedTop = interpolateColors(fromColors.top || '#000000', toColors.top || '#000000', progress);
+        const interpolatedMiddle1 = interpolateColors(fromColors.middle1 || '#000000', toColors.middle1 || '#000000', progress);
+        const interpolatedMiddle2 = interpolateColors(fromColors.middle2 || '#000000', toColors.middle2 || '#000000', progress);
+        const interpolatedBottom = interpolateColors(fromColors.bottom || '#000000', toColors.bottom || '#000000', progress);
+
+        if (map.current.getLayer('sky')) {
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, interpolatedTop,
+            0.4, interpolatedMiddle1,
+            0.7, interpolatedMiddle2,
+            1.0, interpolatedBottom
+          ]);
+        }
+
+        // Handle stars for night sky transitions
+        if (toGradient === 'night' && progress > 0.5) {
+          addStars();
+        } else if (fromGradient === 'night' && progress > 0.5) {
+          removeStars();
+        }
+      } catch (error) {
+        console.error('Error applying smooth sky transition:', error);
+      }
+    }
+  };
+
+  const changeSkyGradient = (gradientType: 'blue' | 'sunset' | 'night') => {
+    console.log('Changing sky gradient to:', gradientType);
+    setSkyGradient(gradientType);
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        const colors = getSkyGradientColors(gradientType);
+        if (map.current.getLayer('sky')) {
+          if (gradientType === 'sunset') {
+            map.current.setPaintProperty('sky', 'sky-gradient', [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0, colors.top,      // Deep blue at top
+              0.4, colors.middle1,  // Bright blue
+              0.7, colors.middle2,  // Purple-lavender
+              1.0, colors.bottom    // Warmer orange
+            ]);
+          } else if (gradientType === 'night') {
+            map.current.setPaintProperty('sky', 'sky-gradient', [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0, colors.top,      // Deep night blue
+              0.3, colors.middle1,  // Dark blue-purple
+              0.6, colors.middle2,  // Twilight blue
+              1.0, colors.bottom    // Slightly lighter night blue
+            ]);
+            // Add stars for night sky
+            addStars();
+          } else {
+            // Remove stars for non-night skies
+            removeStars();
+            map.current.setPaintProperty('sky', 'sky-gradient', [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0, colors.top,
+              0.5, colors.middle,
+              1.0, colors.bottom
+            ]);
+          }
+        }
+        if (map.current.getLayer('background')) {
+          map.current.setPaintProperty('background', 'background-color', colors.bottom);
+        }
+        try {
+          map.current.setFog(null); // Completely remove fog/atmospheric haze
+        } catch (e) {
+          console.log('Could not remove fog effects');
+        }
+        map.current.triggerRepaint();
+        console.log('Sky gradient updated immediately');
+      } catch (error) {
+        console.error('Error updating sky gradient:', error);
+        console.log('Falling back to layer reinitialization');
+        setTimeout(() => { initializeLayers(); }, 100);
+      }
+    }
+  };
+
   const changeFogColor = (newColor: string) => {
     console.log('Changing fog color to:', newColor);
     setFogColor(newColor);
@@ -391,19 +686,21 @@ const Map: React.FC<MapProps> = ({
     if (map.current && map.current.isStyleLoaded()) {
       try {
         // Update sky layer color
+        const colors = getSkyGradientColors(skyGradient);
         if (map.current.getLayer('sky')) {
           map.current.setPaintProperty('sky', 'sky-gradient', [
             'interpolate',
             ['linear'],
             ['sky-radial-progress'],
-            0.0, newColor,
-            1.0, newColor
+            0.0, colors.top,
+            0.5, colors.middle,
+            1.0, colors.bottom
           ]);
         }
         
         // Update background color
         if (map.current.getLayer('background')) {
-          map.current.setPaintProperty('background', 'background-color', newColor);
+          map.current.setPaintProperty('background', 'background-color', colors.bottom);
         }
         
         // Completely remove fog/atmospheric haze
@@ -515,6 +812,7 @@ const Map: React.FC<MapProps> = ({
     // Add sky layer first
     try {
       console.log('Adding sky layer');
+      const colors = getSkyGradientColors(skyGradient);
       currentMap.addLayer({
         'id': 'sky',
         'type': 'sky',
@@ -522,12 +820,29 @@ const Map: React.FC<MapProps> = ({
           'sky-type': 'gradient',
           'sky-gradient-center': [0, 0],
           'sky-gradient-radius': 90,
-          'sky-gradient': [
+          'sky-gradient': skyGradient === 'sunset' ? [
             'interpolate',
             ['linear'],
             ['sky-radial-progress'],
-            0.0, fogColor, // sky color
-            1.0, fogColor  // sky color
+            0.0, colors.top,      // Deep blue at top
+            0.4, colors.middle1,  // Bright blue
+            0.7, colors.middle2,  // Purple-lavender
+            1.0, colors.bottom    // Warmer orange
+          ] : skyGradient === 'night' ? [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, colors.top,      // Deep night blue
+            0.3, colors.middle1,  // Dark blue-purple
+            0.6, colors.middle2,  // Twilight blue
+            1.0, colors.bottom    // Slightly lighter night blue
+          ] : [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, colors.top,
+            0.5, colors.middle,
+            1.0, colors.bottom
           ],
           'sky-opacity': 1.0
         } as any
@@ -537,12 +852,12 @@ const Map: React.FC<MapProps> = ({
       
       // Set the background color to match the sky color
       if (currentMap.getLayer('background')) {
-        currentMap.setPaintProperty('background', 'background-color', fogColor);
+        currentMap.setPaintProperty('background', 'background-color', colors.bottom);
       } else {
         currentMap.addLayer({
           'id': 'background',
           'type': 'background',
-          'paint': { 'background-color': fogColor }
+          'paint': { 'background-color': colors.bottom }
         }, 'sky');
       }
 
@@ -698,10 +1013,96 @@ const Map: React.FC<MapProps> = ({
   // Apply default fog color when map is ready
   useEffect(() => {
     if (map.current && map.current.isStyleLoaded()) {
-      console.log('Applying default fog color');
+      console.log('Applying default fog color:', fogColor);
       changeFogColor(fogColor);
     }
-  }, [map.current, fogColor]);
+  }, [map.current, fogColor, changeFogColor]);
+
+  // Apply fog color whenever it changes
+  useEffect(() => {
+    if (map.current && map.current.isStyleLoaded()) {
+      console.log('Fog color changed, applying:', fogColor);
+      changeFogColor(fogColor);
+    }
+  }, [fogColor]);
+
+  // Day-Night Cycle Effect
+  useEffect(() => {
+    if (!dayNightCycle) return;
+
+    const interval = setInterval(() => {
+      setCycleTime(prevTime => {
+        const newTime = (prevTime + 1) % 24; // 24-second cycle
+        
+        // Determine which sky to show based on time
+        let newSky: 'blue' | 'sunset' | 'night';
+        if (newTime < 6) {
+          newSky = 'blue'; // 0-6 seconds: Blue Sky
+        } else if (newTime < 12) {
+          newSky = 'sunset'; // 6-12 seconds: Sunset Sky
+        } else if (newTime < 18) {
+          newSky = 'night'; // 12-18 seconds: Night Sky
+        } else {
+          newSky = 'sunset'; // 18-24 seconds: Sunset Sky again
+        }
+        
+        // Update sky if it changed
+        if (newSky !== skyGradient) {
+          setSkyGradient(newSky);
+        }
+        
+        return newTime;
+      });
+    }, 1000); // Update every second
+
+    return () => clearInterval(interval);
+  }, [dayNightCycle, skyGradient]);
+
+  // Smooth transition effect when sky gradient changes
+  useEffect(() => {
+    if (!dayNightCycle) return;
+
+    // Determine the previous sky based on cycle time
+    let previousSky: 'blue' | 'sunset' | 'night';
+    const prevTime = (cycleTime - 1 + 24) % 24; // Previous second
+    
+    if (prevTime < 6) {
+      previousSky = 'blue';
+    } else if (prevTime < 12) {
+      previousSky = 'sunset';
+    } else if (prevTime < 18) {
+      previousSky = 'night';
+    } else {
+      previousSky = 'sunset';
+    }
+
+    // Only transition if we're actually changing skies
+    if (previousSky !== skyGradient) {
+      // Animate the transition over 1 second
+      const transitionDuration = 1000; // 1 second
+      const startTime = Date.now();
+      
+      const animateTransition = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / transitionDuration, 1);
+        
+        // Use easing function for smoother transition
+        const easedProgress = progress < 0.5 
+          ? 2 * progress * progress 
+          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        
+        applySmoothSkyTransition(previousSky, skyGradient, easedProgress);
+        
+        if (progress < 1) {
+          requestAnimationFrame(animateTransition);
+        }
+      };
+      
+      animateTransition();
+    }
+  }, [skyGradient, dayNightCycle, cycleTime]);
+
+
 
   // Function to handle model import
   const handleModelImport = () => {
@@ -1165,7 +1566,7 @@ const Map: React.FC<MapProps> = ({
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
         <h3 style={{ color: 'white', margin: 0 }}>Timeline</h3>
-        {renderPlaybackControls()}
+        {!isSlideshowMode && renderPlaybackControls()}
         <div style={{ display: 'flex', gap: '8px' }}>
           <input
             type="range"
@@ -1642,8 +2043,10 @@ const Map: React.FC<MapProps> = ({
 
     map.current = mapInstance;
 
-    // Add navigation controls
-    mapInstance.addControl(new mapboxgl.NavigationControl());
+    // Add navigation controls (only in editor mode)
+    if (!isSlideshowMode) {
+      mapInstance.addControl(new mapboxgl.NavigationControl());
+    }
 
     // Get default modes from a temporary instance
     const defaultModes = (MapboxDraw as any).modes || (new (MapboxDraw as any)()).modes;
@@ -1656,8 +2059,11 @@ const Map: React.FC<MapProps> = ({
         draw_polygon: FreehandMode
       }
     });
-    mapInstance.addControl(drawInstance, 'top-left');
-    setDraw(drawInstance);
+    // Add draw control only in editor mode
+    if (!isSlideshowMode) {
+      mapInstance.addControl(drawInstance, 'top-left');
+      setDraw(drawInstance);
+    }
 
     // Wait for the style to load before adding custom layers
     mapInstance.on('style.load', () => {
@@ -2984,30 +3390,31 @@ const Map: React.FC<MapProps> = ({
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
 
       {/* Collapsible Top Bar for Controls */}
-      <div>
-        <div
-          className={`side-panel-glass${showSidePanel ? ' open' : ' closed'}`}
-          style={{
-            position: 'absolute',
-            top: showSidePanel ? 24 : -100,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: 'auto',
-            minHeight: 0,
-            zIndex: 1100,
-            background: 'rgba(255,255,255,0.75)',
-            boxShadow: '2px 0 16px rgba(33,150,243,0.10)',
-            borderRadius: '18px',
-            padding: '10px 18px',
-            display: 'flex',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 18,
-            transition: 'top 0.35s cubic-bezier(.4,1.4,.6,1)',
-            backdropFilter: 'blur(10px)',
-            pointerEvents: showSidePanel ? 'auto' : 'none',
-          }}
-        >
+      {!isSlideshowMode && (
+        <div>
+          <div
+            className={`side-panel-glass${showSidePanel ? ' open' : ' closed'}`}
+            style={{
+              position: 'absolute',
+              top: showSidePanel ? 24 : -100,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              width: 'auto',
+              minHeight: 0,
+              zIndex: 1100,
+              background: 'rgba(255,255,255,0.75)',
+              boxShadow: '2px 0 16px rgba(33,150,243,0.10)',
+              borderRadius: '18px',
+              padding: '10px 18px',
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 18,
+              transition: 'top 0.35s cubic-bezier(.4,1.4,.6,1)',
+              backdropFilter: 'blur(10px)',
+              pointerEvents: showSidePanel ? 'auto' : 'none',
+            }}
+          >
           <button
             onClick={() => setShowSettings(!showSettings)}
             className="sidepanel-btn"
@@ -3181,6 +3588,7 @@ const Map: React.FC<MapProps> = ({
           }
         `}</style>
       </div>
+      )}
 
       {isRecordingPath && (
         <Draggable nodeRef={recordingPathRef as React.RefObject<HTMLElement>}>
@@ -3200,13 +3608,13 @@ const Map: React.FC<MapProps> = ({
       {showTimeline && (
         <Draggable nodeRef={timelinePanelRef as React.RefObject<HTMLElement>}>
           <div ref={timelinePanelRef}>
-            {renderTimelinePanel()}
+            {!isSlideshowMode && renderTimelinePanel()}
           </div>
         </Draggable>
       )}
 
       {/* Actor Panel */}
-      {showActorPanel && (
+      {showActorPanel && !isSlideshowMode && (
         <Draggable nodeRef={actorPanelRef as React.RefObject<HTMLElement>}>
           <div ref={actorPanelRef}>
             {renderActorPanel()}
@@ -3215,7 +3623,7 @@ const Map: React.FC<MapProps> = ({
       )}
 
       {/* Effects Panel */}
-      {showEffectsPanel && (
+      {showEffectsPanel && !isSlideshowMode && (
         <Draggable nodeRef={effectsPanelRef as React.RefObject<HTMLElement>}>
           <div ref={effectsPanelRef} className="effects-panel" style={{
             background: 'rgba(0, 0, 0, 0.9)',
@@ -3265,10 +3673,10 @@ const Map: React.FC<MapProps> = ({
       )}
 
       {/* Building Creation Panel */}
-      {showBuildingCreationPanel && renderBuildingCreationPanel()}
+      {showBuildingCreationPanel && !isSlideshowMode && renderBuildingCreationPanel()}
 
       {/* Building Groups Panel */}
-      {showGroupPanel && (
+      {showGroupPanel && !isSlideshowMode && (
         <div style={{
           position: 'absolute',
           top: '20px',
@@ -3473,25 +3881,78 @@ const Map: React.FC<MapProps> = ({
       )}
 
       {/* Settings Button */}
+      {!isSlideshowMode && (
+        <button 
+          className="settings-button"
+          onClick={() => setShowSettings(!showSettings)}
+          style={{
+            background: '#ffffff',
+            border: 'none',
+            borderRadius: '4px',
+            padding: '8px 16px',
+            fontSize: '16px',
+            cursor: 'pointer',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          ⚙️ Settings
+        </button>
+      )}
+
+      {/* Slideshow Mode Toggle Button */}
       <button 
-        className="settings-button"
-        onClick={() => setShowSettings(!showSettings)}
+        onClick={toggleSlideshowMode}
         style={{
-          background: '#ffffff',
+          position: 'absolute',
+          top: '20px',
+          left: '20px',
+          background: isSlideshowMode ? '#FF9800' : '#4CAF50',
           border: 'none',
-          borderRadius: '4px',
-          padding: '8px 16px',
-          fontSize: '16px',
+          borderRadius: '8px',
+          padding: '10px 16px',
+          fontSize: '14px',
           cursor: 'pointer',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-          transition: 'all 0.2s ease'
+          color: 'white',
+          fontWeight: 'bold',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+          transition: 'all 0.2s ease',
+          zIndex: 1000,
+          backdropFilter: 'blur(10px)'
         }}
+        title={isSlideshowMode ? 'Switch to Editor Mode' : 'Switch to Slideshow Mode'}
       >
-        ⚙️ Settings
+        {isSlideshowMode ? '🎬 Slideshow' : '✏️ Editor'}
       </button>
 
+      {/* Slideshow Mode Settings Access */}
+      {isSlideshowMode && (
+        <button 
+          onClick={() => setShowSettings(!showSettings)}
+          style={{
+            position: 'absolute',
+            top: '20px',
+            right: '20px',
+            background: 'rgba(0,0,0,0.3)',
+            border: 'none',
+            borderRadius: '50%',
+            width: '40px',
+            height: '40px',
+            fontSize: '16px',
+            cursor: 'pointer',
+            color: 'white',
+            backdropFilter: 'blur(10px)',
+            transition: 'all 0.2s ease',
+            zIndex: 1000
+          }}
+          title="Settings"
+        >
+          ⚙️
+        </button>
+      )}
 
-      {buildings.length > 0 && (
+
+      {buildings.length > 0 && !isSlideshowMode && (
         <Draggable nodeRef={cubeSliderRef as React.RefObject<HTMLElement>}>
           <div ref={cubeSliderRef} className="cube-slider-container enhanced-cube-slider" style={{
             position: 'absolute',
@@ -3621,7 +4082,8 @@ const Map: React.FC<MapProps> = ({
       )}
 
       {/* Line List */}
-      <Draggable nodeRef={sidebarLinesRef as React.RefObject<HTMLElement>}>
+      {!isSlideshowMode && (
+        <Draggable nodeRef={sidebarLinesRef as React.RefObject<HTMLElement>}>
         <div ref={sidebarLinesRef} className="sidebar-lines-list" style={{
           position: 'absolute',
           top: '80px',
@@ -3701,12 +4163,13 @@ const Map: React.FC<MapProps> = ({
           ))}
         </div>
       </Draggable>
+      )}
 
       {/* Building Creation Panel */}
-      {showBuildingCreationPanel && renderBuildingCreationPanel()}
+      {showBuildingCreationPanel && !isSlideshowMode && renderBuildingCreationPanel()}
 
       {/* Settings Panel */}
-      {showSettings && (
+      {showSettings && !isSlideshowMode && (
         <div style={{
           position: 'absolute',
           top: '20px',
@@ -3723,20 +4186,24 @@ const Map: React.FC<MapProps> = ({
           overflowY: 'auto'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-            <h3 style={{ margin: 0, color: '#1976d2', fontSize: '18px' }}>World Layout Settings</h3>
-            <button
-              onClick={() => setShowSettings(false)}
-              style={{
-                background: 'none',
-                border: 'none',
-                fontSize: '20px',
-                cursor: 'pointer',
-                color: '#666'
-              }}
-            >
-              ×
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                onClick={() => setShowSettings(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '20px',
+                  cursor: 'pointer',
+                  color: '#666'
+                }}
+              >
+                ×
+              </button>
+              <h3 style={{ margin: 0, color: '#1976d2', fontSize: '18px' }}>World Layout Settings</h3>
+            </div>
           </div>
+
+
 
           {/* Map Style Selection */}
           <div style={{ marginBottom: '20px' }}>
@@ -3816,26 +4283,53 @@ const Map: React.FC<MapProps> = ({
             </div>
           </div>
 
-          {/* Fog Color */}
+          {/* Sky Gradient */}
           <div style={{ marginBottom: '20px' }}>
-            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Fog/Sky Color</h4>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <input
-                type="color"
-                value={fogColor}
-                onChange={(e) => changeFogColor(e.target.value)}
-                style={{
-                  width: '50px',
-                  height: '40px',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  boxShadow: '0 2px 8px rgba(33,150,243,0.08)'
-                }}
-              />
-              <span style={{ color: '#666', fontSize: '14px' }}>{fogColor}</span>
-            </div>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Sky Gradient</h4>
+            <select
+              value={skyGradient}
+              onChange={(e) => changeSkyGradient(e.target.value as 'blue' | 'sunset' | 'night')}
+              style={{
+                width: '100%',
+                padding: '8px',
+                borderRadius: '4px',
+                border: '1px solid #ddd',
+                fontSize: '14px',
+                backgroundColor: 'white'
+              }}
+            >
+              <option value="blue">Blue Sky</option>
+              <option value="sunset">Sunset Sky</option>
+              <option value="night">Night Sky</option>
+            </select>
           </div>
+
+          {/* Day-Night Cycle */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Day-Night Cycle</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+              <button
+                onClick={dayNightCycle ? stopDayNightCycle : startDayNightCycle}
+                style={{
+                  background: dayNightCycle ? '#f44336' : '#4CAF50',
+                  color: 'white',
+                  border: 'none',
+                  padding: '8px 16px',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  flex: 1
+                }}
+              >
+                {dayNightCycle ? 'Stop Cycle' : 'Start Cycle'}
+              </button>
+            </div>
+
+          </div>
+
+
+
+
 
           {/* Refresh Button */}
           <div style={{ marginBottom: '20px' }}>
