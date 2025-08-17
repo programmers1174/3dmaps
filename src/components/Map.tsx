@@ -13,7 +13,6 @@ interface MapProps {
   accessToken: string;
   initialCoordinates?: [number, number];
   initialZoom?: number;
-  initialStyle?: string;
 }
 
 interface Layer3D {
@@ -102,12 +101,11 @@ interface Effect {
 const Map: React.FC<MapProps> = ({
   accessToken,
   initialCoordinates = [-122.4194, 37.7749], // San Francisco
-  initialZoom = 15,
-  initialStyle = 'mapbox://styles/mapbox/satellite-streets-v12'
+  initialZoom = 15
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  const [style, setStyle] = useState(initialStyle);
+  const [style, setStyle] = useState('mapbox://styles/mapbox/satellite-streets-v12');
   const [showSettings, setShowSettings] = useState(false);
   const [showLabels, setShowLabels] = useState(false);
   const [layers3D, setLayers3D] = useState<Layer3D[]>([
@@ -169,7 +167,7 @@ const Map: React.FC<MapProps> = ({
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
   const [fogColor, setFogColor] = useState('#1E3A8A'); // Default sky color for fog/sky
-  const [skyGradient, setSkyGradient] = useState<'blue' | 'sunset' | 'night'>('blue');
+  const [skyGradient, setSkyGradient] = useState<'blue' | 'sunset' | 'night'>('night');
   const [dayNightCycle, setDayNightCycle] = useState(true);
   const [cycleTime, setCycleTime] = useState(0); // 0-24 seconds
   const [transitionProgress, setTransitionProgress] = useState(0); // 0-1 for smooth transitions
@@ -203,13 +201,7 @@ const Map: React.FC<MapProps> = ({
   // Add new state for panel type
   const [creationPanelType, setCreationPanelType] = useState<'building' | 'cloud'>('building');
 
-  const mapStyles = [
-    { id: 'mapbox://styles/mapbox/streets-v12', name: 'Streets' },
-    { id: 'mapbox://styles/mapbox/satellite-streets-v12', name: 'Satellite' },
-    { id: 'mapbox://styles/mapbox/satellite-v9', name: 'Satellite (Flat)' },
-    { id: 'mapbox://styles/mapbox/dark-v11', name: 'Dark' },
-    { id: 'mapbox://styles/mapbox/light-v11', name: 'Light' }
-  ];
+
 
   const toggle3DLayer = (layerId: string) => {
     console.log('Toggling 3D layer:', layerId);
@@ -434,8 +426,8 @@ const Map: React.FC<MapProps> = ({
       return {
         top: '#000000',    // Pure black
         middle1: '#000000', // Pure black
-        middle2: '#301934', // Pure black
-        bottom: '#301934'  // Pure black
+        middle2: '#000000', // Pure black
+        bottom: '#000000'  // Pure black
       };
     }
   };
@@ -576,9 +568,12 @@ const Map: React.FC<MapProps> = ({
 
     if (!rgb1 || !rgb2) return color1;
 
-    const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * progress);
-    const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * progress);
-    const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * progress);
+    // Apply smooth easing to the progress
+    const easedProgress = easeInOutCubic(progress);
+    
+    const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * easedProgress);
+    const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * easedProgress);
+    const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * easedProgress);
 
     return rgbToHex(r, g, b);
   };
@@ -606,10 +601,12 @@ const Map: React.FC<MapProps> = ({
           ]);
         }
 
-        // Handle stars for night sky transitions
-        if (toGradient === 'night' && progress > 0.5) {
+        // Handle stars for night sky transitions - make them fade in/out smoothly
+        if (toGradient === 'night' && progress > 0.2) {
+          // Start adding stars when transitioning to night (at 20% progress)
           addStars();
-        } else if (fromGradient === 'night' && progress > 0.5) {
+        } else if (fromGradient === 'night' && progress > 0.8) {
+          // Start removing stars when transitioning away from night (at 80% progress)
           removeStars();
         }
       } catch (error) {
@@ -676,6 +673,108 @@ const Map: React.FC<MapProps> = ({
         setTimeout(() => { initializeLayers(); }, 100);
       }
     }
+  };
+
+  // Smooth easing function for transitions
+  const easeInOutCubic = (t: number): number => {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  };
+
+  // Apply continuous sky blending for truly smooth transitions
+  const applyContinuousSkyBlending = (blueIntensity: number, sunsetIntensity: number, nightIntensity: number) => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        const blueColors = getSkyGradientColors('blue');
+        const sunsetColors = getSkyGradientColors('sunset');
+        const nightColors = getSkyGradientColors('night');
+        
+        // Blend all three sky types continuously based on their intensities
+        const blendedTop = blendThreeColors(
+          sunsetColors.top || '#000000',
+          blueColors.top || '#000000', 
+          nightColors.top || '#000000',
+          sunsetIntensity, blueIntensity, nightIntensity
+        );
+        
+        const blendedMiddle1 = blendThreeColors(
+          sunsetColors.middle1 || '#000000',
+          blueColors.middle1 || '#000000',
+          nightColors.middle1 || '#000000',
+          sunsetIntensity, blueIntensity, nightIntensity
+        );
+        
+        const blendedMiddle2 = blendThreeColors(
+          sunsetColors.middle2 || '#000000',
+          blueColors.middle2 || '#000000',
+          nightColors.middle2 || '#000000',
+          sunsetIntensity, blueIntensity, nightIntensity
+        );
+        
+        const blendedBottom = blendThreeColors(
+          sunsetColors.bottom || '#000000',
+          blueColors.bottom || '#000000',
+          nightColors.bottom || '#000000',
+          sunsetIntensity, blueIntensity, nightIntensity
+        );
+        
+        if (map.current.getLayer('sky')) {
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, blendedTop,
+            0.4, blendedMiddle1,
+            0.7, blendedMiddle2,
+            1.0, blendedBottom
+          ]);
+        }
+        
+        // Handle stars based on night intensity
+        if (nightIntensity > 0.5) {
+          addStars();
+        } else {
+          removeStars();
+        }
+      } catch (error) {
+        console.error('Error applying continuous sky blending:', error);
+      }
+    }
+  };
+
+  // Blend three colors based on their intensities
+  const blendThreeColors = (color1: string, color2: string, color3: string, intensity1: number, intensity2: number, intensity3: number): string => {
+    // Convert hex to RGB using the existing interpolateColors function's helper functions
+    const hexToRgb = (hex: string) => {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return result ? {
+        r: parseInt(result[1], 16),
+        g: parseInt(result[2], 16),
+        b: parseInt(result[3], 16)
+      } : null;
+    };
+
+    // Convert RGB to hex using the existing interpolateColors function's helper functions
+    const rgbToHex = (r: number, g: number, b: number) => {
+      return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+    };
+    
+    const rgb1 = hexToRgb(color1);
+    const rgb2 = hexToRgb(color2);
+    const rgb3 = hexToRgb(color3);
+    
+    if (!rgb1 || !rgb2 || !rgb3) return color1;
+    
+    // Normalize intensities to sum to 1
+    const totalIntensity = intensity1 + intensity2 + intensity3;
+    const normalized1 = intensity1 / totalIntensity;
+    const normalized2 = intensity2 / totalIntensity;
+    const normalized3 = intensity3 / totalIntensity;
+    
+    const r = Math.round(rgb1.r * normalized1 + rgb2.r * normalized2 + rgb3.r * normalized3);
+    const g = Math.round(rgb1.g * normalized1 + rgb2.g * normalized2 + rgb3.g * normalized3);
+    const b = Math.round(rgb1.b * normalized1 + rgb2.b * normalized2 + rgb3.b * normalized3);
+    
+    return rgbToHex(r, g, b);
   };
 
   const changeFogColor = (newColor: string) => {
@@ -1032,75 +1131,38 @@ const Map: React.FC<MapProps> = ({
 
     const interval = setInterval(() => {
       setCycleTime(prevTime => {
-        const newTime = (prevTime + 1) % 24; // 24-second cycle
+        const newTime = (prevTime + 0.016) % 24; // 24-second cycle, but update every 0.016 seconds for ultra-smooth transitions
         
-        // Determine which sky to show based on time
-        let newSky: 'blue' | 'sunset' | 'night';
-        if (newTime < 6) {
-          newSky = 'blue'; // 0-6 seconds: Blue Sky
-        } else if (newTime < 12) {
-          newSky = 'sunset'; // 6-12 seconds: Sunset Sky
-        } else if (newTime < 18) {
-          newSky = 'night'; // 12-18 seconds: Night Sky
-        } else {
-          newSky = 'sunset'; // 18-24 seconds: Sunset Sky again
-        }
+        // Calculate continuous progress through the cycle (0-1)
+        const cycleProgress = newTime / 24;
         
-        // Update sky if it changed
-        if (newSky !== skyGradient) {
-          setSkyGradient(newSky);
-        }
+        // Create continuous flowing transitions through all sky colors
+        
+        // Create truly continuous flowing transitions using mathematical interpolation
+        // This creates a smooth, constant motion through all sky colors without phases
+        
+        // Use trigonometric functions to create smooth, continuous color cycling
+        const angle = cycleProgress * 2 * Math.PI; // Convert to radians (0 to 2π)
+        
+        // Create a continuous mathematical function that smoothly cycles through all colors
+        // This eliminates the phase-based approach and creates constant motion
+        
+        // Calculate continuous color interpolation using sine waves
+        const blueIntensity = Math.sin(angle) * 0.5 + 0.5; // 0 to 1
+        const sunsetIntensity = Math.sin(angle + Math.PI/2) * 0.5 + 0.5; // 0 to 1, offset by 90°
+        const nightIntensity = Math.sin(angle + Math.PI) * 0.5 + 0.5; // 0 to 1, offset by 180°
+        
+        // Apply the continuous color blending directly
+        applyContinuousSkyBlending(blueIntensity, sunsetIntensity, nightIntensity);
         
         return newTime;
       });
-    }, 1000); // Update every second
+    }, 16); // Update every 16ms for ultra-smooth 60fps transitions
 
     return () => clearInterval(interval);
-  }, [dayNightCycle, skyGradient]);
+  }, [dayNightCycle]);
 
-  // Smooth transition effect when sky gradient changes
-  useEffect(() => {
-    if (!dayNightCycle) return;
 
-    // Determine the previous sky based on cycle time
-    let previousSky: 'blue' | 'sunset' | 'night';
-    const prevTime = (cycleTime - 1 + 24) % 24; // Previous second
-    
-    if (prevTime < 6) {
-      previousSky = 'blue';
-    } else if (prevTime < 12) {
-      previousSky = 'sunset';
-    } else if (prevTime < 18) {
-      previousSky = 'night';
-    } else {
-      previousSky = 'sunset';
-    }
-
-    // Only transition if we're actually changing skies
-    if (previousSky !== skyGradient) {
-      // Animate the transition over 1 second
-      const transitionDuration = 1000; // 1 second
-      const startTime = Date.now();
-      
-      const animateTransition = () => {
-        const elapsed = Date.now() - startTime;
-        const progress = Math.min(elapsed / transitionDuration, 1);
-        
-        // Use easing function for smoother transition
-        const easedProgress = progress < 0.5 
-          ? 2 * progress * progress 
-          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-        
-        applySmoothSkyTransition(previousSky, skyGradient, easedProgress);
-        
-        if (progress < 1) {
-          requestAnimationFrame(animateTransition);
-        }
-      };
-      
-      animateTransition();
-    }
-  }, [skyGradient, dayNightCycle, cycleTime]);
 
 
 
@@ -2029,7 +2091,7 @@ const Map: React.FC<MapProps> = ({
 
     const mapInstance = new mapboxgl.Map({
       container: mapContainer.current,
-      style: initialStyle,
+      style: 'mapbox://styles/mapbox/satellite-streets-v12',
       center: [-122.431297, 37.773972], // San Francisco downtown
       zoom: 15,
       pitch: 40,
@@ -2259,6 +2321,11 @@ const Map: React.FC<MapProps> = ({
       // Note: Sky color changes removed to prevent runtime errors
       // The sky will remain solid blue to avoid fog effects
     });
+
+    // Initialize 3D features after map is ready
+    setTimeout(() => {
+      refresh3DFeatures();
+    }, 1000);
 
     // Cleanup function
     return () => {
@@ -4205,27 +4272,7 @@ const Map: React.FC<MapProps> = ({
 
 
 
-          {/* Map Style Selection */}
-          <div style={{ marginBottom: '20px' }}>
-            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Map Style</h4>
-            <select
-              value={style}
-              onChange={(e) => changeMapStyle(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '8px',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                fontSize: '14px'
-              }}
-            >
-              {mapStyles.map(mapStyle => (
-                <option key={mapStyle.id} value={mapStyle.id}>
-                  {mapStyle.name}
-                </option>
-              ))}
-            </select>
-          </div>
+
 
           {/* 3D Layer Controls */}
           <div style={{ marginBottom: '20px' }}>
@@ -4283,26 +4330,7 @@ const Map: React.FC<MapProps> = ({
             </div>
           </div>
 
-          {/* Sky Gradient */}
-          <div style={{ marginBottom: '20px' }}>
-            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Sky Gradient</h4>
-            <select
-              value={skyGradient}
-              onChange={(e) => changeSkyGradient(e.target.value as 'blue' | 'sunset' | 'night')}
-              style={{
-                width: '100%',
-                padding: '8px',
-                borderRadius: '4px',
-                border: '1px solid #ddd',
-                fontSize: '14px',
-                backgroundColor: 'white'
-              }}
-            >
-              <option value="blue">Blue Sky</option>
-              <option value="sunset">Sunset Sky</option>
-              <option value="night">Night Sky</option>
-            </select>
-          </div>
+
 
           {/* Day-Night Cycle */}
           <div style={{ marginBottom: '20px' }}>
@@ -4324,6 +4352,33 @@ const Map: React.FC<MapProps> = ({
                 {dayNightCycle ? 'Stop Cycle' : 'Start Cycle'}
               </button>
             </div>
+            
+            {/* Cycle Progress Indicator */}
+            {dayNightCycle && (
+              <div style={{ marginBottom: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                  <span style={{ flex: '1.0' }}>Continuous Flow</span>
+                </div>
+                <div style={{ 
+                  width: '100%', 
+                  height: '8px', 
+                  background: '#e5e7eb', 
+                  borderRadius: '4px',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    width: `${(cycleTime / 24) * 100}%`,
+                    height: '100%',
+                    background: 'linear-gradient(90deg, #D89060, #3B82F6, #D89060, #000000, #D89060)',
+                    borderRadius: '4px',
+                    transition: 'width 0.1s ease'
+                  }} />
+                </div>
+                <div style={{ textAlign: 'center', fontSize: '11px', color: '#666', marginTop: '4px' }}>
+                  {Math.round((cycleTime / 24) * 100)}% complete
+                </div>
+              </div>
+            )}
 
           </div>
 
@@ -4344,7 +4399,8 @@ const Map: React.FC<MapProps> = ({
                 cursor: 'pointer',
                 fontSize: '14px',
                 width: '100%',
-                marginBottom: '8px'
+                marginBottom: '8px',
+                animation: 'fadeInUp 0.5s'
               }}
             >
               Refresh 3D Features
@@ -4369,11 +4425,26 @@ const Map: React.FC<MapProps> = ({
                 borderRadius: '4px',
                 cursor: 'pointer',
                 fontSize: '14px',
-                width: '100%'
+                width: '100%',
+                animation: 'fadeInUp 0.5s 0.1s'
               }}
             >
               Debug Layers
             </button>
+            
+            {/* Add the fadeInUp animation CSS */}
+            <style>{`
+              @keyframes fadeInUp {
+                from { 
+                  opacity: 0; 
+                  transform: translateY(20px);
+                }
+                to { 
+                  opacity: 1; 
+                  transform: translateY(0);
+                }
+              }
+            `}</style>
           </div>
 
           {/* Terrain Exaggeration */}
