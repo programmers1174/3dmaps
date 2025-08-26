@@ -172,6 +172,7 @@ const Map: React.FC<MapProps> = ({
   const [cycleTime, setCycleTime] = useState(0); // 0-24 seconds
   const [transitionProgress, setTransitionProgress] = useState(0); // 0-1 for smooth transitions
   const [isSlideshowMode, setIsSlideshowMode] = useState(false); // Default to blue gradient
+  const [skyPattern, setSkyPattern] = useState<'blue-dominant' | 'night-dominant'>('blue-dominant'); // Sky pattern selector
 
 
 
@@ -411,9 +412,9 @@ const Map: React.FC<MapProps> = ({
   const getSkyGradientColors = (gradientType: 'blue' | 'sunset' | 'night') => {
     if (gradientType === 'blue') {
       return {
-        top: '#0F4C81',    // Deeper, more vibrant blue
-        middle: '#1E88E5', // Bright, vibrant blue
-        bottom: '#90CAF9'  // Very light vibrant blue
+        top: '#1E3A8A',    // Dark blue
+        middle: '#3B82F6', // Medium blue
+        bottom: '#A9D4FF'  // Light blue
       };
     } else if (gradientType === 'sunset') {
       return {
@@ -519,7 +520,7 @@ const Map: React.FC<MapProps> = ({
         // Remove draw control if it exists
         if (draw && map.current) {
           try {
-            map.current.removeControl(draw);
+          map.current.removeControl(draw);
           } catch (error) {
             console.log('Error removing draw control:', error);
           }
@@ -537,16 +538,16 @@ const Map: React.FC<MapProps> = ({
         // Add draw control back if it doesn't exist
         if (!draw && map.current) {
           try {
-            const drawInstance = new (MapboxDraw as any)({
-              displayControlsDefault: false,
-              controls: { polygon: false, trash: false },
-              modes: {
-                ...(MapboxDraw as any).modes,
-                draw_polygon: FreehandMode
-              }
-            });
-            map.current.addControl(drawInstance, 'top-left');
-            setDraw(drawInstance);
+          const drawInstance = new (MapboxDraw as any)({
+            displayControlsDefault: false,
+            controls: { polygon: false, trash: false },
+            modes: {
+              ...(MapboxDraw as any).modes,
+              draw_polygon: FreehandMode
+            }
+          });
+          map.current.addControl(drawInstance, 'top-left');
+          setDraw(drawInstance);
           } catch (error) {
             console.log('Error adding draw control:', error);
           }
@@ -692,48 +693,99 @@ const Map: React.FC<MapProps> = ({
   const applyContinuousSkyBlending = (blueIntensity: number, sunsetIntensity: number, nightIntensity: number) => {
     if (map.current && map.current.isStyleLoaded()) {
       try {
-        const blueColors = getSkyGradientColors('blue');
-        const sunsetColors = getSkyGradientColors('sunset');
-        
-        // Blend only blue and sunset colors (no night sky)
-        const blendedTop = blendTwoColors(
-          sunsetColors.top || '#000000',
-          blueColors.top || '#000000', 
-          sunsetIntensity, blueIntensity
-        );
-        
-        const blendedMiddle1 = blendTwoColors(
-          sunsetColors.middle1 || '#000000',
-          blueColors.middle1 || '#000000',
-          sunsetIntensity, blueIntensity
-        );
-        
-        const blendedMiddle2 = blendTwoColors(
-          sunsetColors.middle2 || '#000000',
-          blueColors.middle2 || '#000000',
-          sunsetIntensity, blueIntensity
-        );
-        
-        const blendedBottom = blendTwoColors(
-          sunsetColors.bottom || '#000000',
-          blueColors.bottom || '#000000',
-          sunsetIntensity, blueIntensity
-        );
-        
-        if (map.current.getLayer('sky')) {
-          map.current.setPaintProperty('sky', 'sky-gradient', [
-            'interpolate',
-            ['linear'],
-            ['sky-radial-progress'],
-            0.0, blendedTop,
-            0.4, blendedMiddle1,
-            0.7, blendedMiddle2,
-            1.0, blendedBottom
-          ]);
+        if (nightIntensity > 0) {
+          // Pattern 2: Sunset → Night → Sunset (with night sky)
+          const sunsetColors = getSkyGradientColors('sunset');
+          const nightColors = getSkyGradientColors('night');
+          
+          // Blend sunset and night colors
+          const blendedTop = blendTwoColors(
+            sunsetColors.top || '#000000',
+            nightColors.top || '#000000', 
+            sunsetIntensity, nightIntensity
+          );
+          
+          const blendedMiddle1 = blendTwoColors(
+            sunsetColors.middle1 || '#000000',
+            nightColors.middle1 || '#000000',
+            sunsetIntensity, nightIntensity
+          );
+          
+          const blendedMiddle2 = blendTwoColors(
+            sunsetColors.middle2 || '#000000',
+            nightColors.middle2 || '#000000',
+            sunsetIntensity, nightIntensity
+          );
+          
+          const blendedBottom = blendTwoColors(
+            sunsetColors.bottom || '#000000',
+            nightColors.bottom || '#000000',
+            sunsetIntensity, nightIntensity
+          );
+          
+          if (map.current.getLayer('sky')) {
+            map.current.setPaintProperty('sky', 'sky-gradient', [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0, blendedTop,
+              0.4, blendedMiddle1,
+              0.7, blendedMiddle2,
+              1.0, blendedBottom
+            ]);
+          }
+          
+          // Add stars when night sky is present
+          if (nightIntensity > 0.3) {
+            addStars();
+          } else {
+            removeStars();
+          }
+        } else {
+          // Pattern 1: Sunset → Blue Sky → Sunset (no night sky)
+          const blueColors = getSkyGradientColors('blue');
+          const sunsetColors = getSkyGradientColors('sunset');
+          
+          // Blend only blue and sunset colors
+          const blendedTop = blendTwoColors(
+            sunsetColors.top || '#000000',
+            blueColors.top || '#000000', 
+            sunsetIntensity, blueIntensity
+          );
+          
+          const blendedMiddle1 = blendTwoColors(
+            sunsetColors.middle1 || '#000000',
+            blueColors.middle1 || '#000000',
+            sunsetIntensity, blueIntensity
+          );
+          
+          const blendedMiddle2 = blendTwoColors(
+            sunsetColors.middle2 || '#000000',
+            blueColors.middle2 || '#000000',
+            sunsetIntensity, blueIntensity
+          );
+          
+          const blendedBottom = blendTwoColors(
+            sunsetColors.bottom || '#000000',
+            blueColors.bottom || '#000000',
+            sunsetIntensity, blueIntensity
+          );
+          
+          if (map.current.getLayer('sky')) {
+            map.current.setPaintProperty('sky', 'sky-gradient', [
+              'interpolate',
+              ['linear'],
+              ['sky-radial-progress'],
+              0.0, blendedTop,
+              0.4, blendedMiddle1,
+              0.7, blendedMiddle2,
+              1.0, blendedBottom
+            ]);
+          }
+          
+          // Remove stars since there's no night sky
+          removeStars();
         }
-        
-        // Remove stars since there's no night sky
-        removeStars();
       } catch (error) {
         console.error('Error applying continuous sky blending:', error);
       }
@@ -1197,20 +1249,50 @@ const Map: React.FC<MapProps> = ({
         // Create a continuous mathematical function that smoothly cycles through all colors
         // This eliminates the phase-based approach and creates constant motion
         
-        // Calculate continuous color interpolation using sine waves
-        // Adjust blue to have extremely long duration by modifying the sine wave
-        const blueIntensity = Math.sin(angle * 0.25) * 0.5 + 0.5; // 0 to 1, extremely slow cycle for very long blue duration
-        const sunsetIntensity = Math.sin(angle + Math.PI/4) * 0.5 + 0.5; // 0 to 1, offset by 45° for better flow
-        
-        // Apply the continuous color blending directly (no night sky)
-        applyContinuousSkyBlending(blueIntensity, sunsetIntensity, 0);
+                // Calculate continuous color interpolation using sine waves based on selected pattern
+        if (skyPattern === 'blue-dominant') {
+          // Pattern 1: Sunset → Blue Sky → Sunset (no night)
+          const blueIntensity = Math.sin(angle * 0.4) * 0.5 + 0.5; // 0 to 1, much slower cycle for longer blue duration
+          const sunsetIntensity = Math.sin(angle + Math.PI/4) * 0.5 + 0.5; // 0 to 1, offset by 45° for better flow
+          
+          // Apply the continuous color blending directly (no night sky)
+          applyContinuousSkyBlending(blueIntensity, sunsetIntensity, 0);
+        } else {
+          // Pattern 2: Sunset → Night → Sunset
+          const sunsetIntensity = Math.sin(angle * 0.6) * 0.5 + 0.5; // 0 to 1, sunset dominates
+          const nightIntensity = Math.sin(angle + Math.PI/2) * 0.5 + 0.5; // 0 to 1, night appears in middle
+          
+          // Apply the continuous color blending with night sky
+          applyContinuousSkyBlending(0, sunsetIntensity, nightIntensity);
+        }
         
         return newTime;
       });
     }, 16); // Update every 16ms for ultra-smooth 60fps transitions
 
     return () => clearInterval(interval);
-  }, [dayNightCycle]);
+  }, [dayNightCycle, skyPattern]); // Added skyPattern dependency
+
+  // Immediate sky update when pattern changes
+  useEffect(() => {
+    if (dayNightCycle && map.current && map.current.isStyleLoaded()) {
+      // Force an immediate sky update with current pattern
+      const currentProgress = cycleTime / 24;
+      const angle = currentProgress * 2 * Math.PI;
+      
+            if (skyPattern === 'blue-dominant') {
+        // Pattern 1: Sunset → Blue Sky → Sunset (no night)
+        const blueIntensity = Math.sin(angle * 0.4) * 0.5 + 0.5;
+        const sunsetIntensity = Math.sin(angle + Math.PI/4) * 0.5 + 0.5;
+        applyContinuousSkyBlending(blueIntensity, sunsetIntensity, 0);
+      } else {
+        // Pattern 2: Sunset → Night → Sunset
+        const sunsetIntensity = Math.sin(angle * 0.6) * 0.5 + 0.5;
+        const nightIntensity = Math.sin(angle + Math.PI/2) * 0.5 + 0.5;
+        applyContinuousSkyBlending(0, sunsetIntensity, nightIntensity);
+      }
+    }
+  }, [skyPattern, dayNightCycle, cycleTime]); // Update when pattern changes
 
   // Cleanup effect for draw control
   useEffect(() => {
@@ -1242,11 +1324,91 @@ const Map: React.FC<MapProps> = ({
         console.log('Removed dark shade element:', element.id);
       }
     });
+
+    // Convert dark overlays to vibrant blue instead of removing them
+    const potentialDarkShades = document.querySelectorAll('div, span, section, article');
+    potentialDarkShades.forEach(element => {
+      try {
+        const style = window.getComputedStyle(element);
+        const backgroundColor = style.backgroundColor;
+        const opacity = style.opacity;
+        const zIndex = style.zIndex;
+        
+        // Check if this looks like a dark shade overlay
+        if (
+          (backgroundColor.includes('rgba(0, 0, 0') || backgroundColor.includes('rgb(0, 0, 0)')) &&
+          (opacity === '0.3' || opacity === '0.5' || opacity === '0.7' || opacity === '0.8') &&
+          (zIndex === '1000' || zIndex === '999' || zIndex === '1001' || zIndex === '9999')
+        ) {
+          console.log('Converting dark shade to vibrant blue:', element);
+          // Convert to vibrant blue instead of removing
+          (element as HTMLElement).style.background = 'linear-gradient(180deg, #00BFFF 0%, #1E90FF 50%, #4169E1 100%)';
+          (element as HTMLElement).style.opacity = '0.6';
+          (element as HTMLElement).style.zIndex = '1000';
+        }
+      } catch (e) {
+        // Ignore errors
+      }
+    });
+
+    // Force remove any remaining dark elements by searching the entire DOM
+    setTimeout(() => {
+      const remainingElements = document.querySelectorAll('*');
+      remainingElements.forEach(element => {
+        if (element.id && (
+          element.id.toLowerCase().includes('dark') ||
+          element.id.toLowerCase().includes('shade') ||
+          element.id.toLowerCase().includes('overlay') ||
+          element.id.toLowerCase().includes('shadow')
+        )) {
+          console.log('Removing remaining dark/shade element:', element.id);
+          element.remove();
+        }
+      });
+    }, 100);
+
+    // Set up continuous monitoring for any new dark overlays
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const element = node as Element;
+            try {
+              const style = window.getComputedStyle(element);
+              const backgroundColor = style.backgroundColor;
+              const opacity = style.opacity;
+              const zIndex = style.zIndex;
+              
+              // Check if this looks like a dark shade overlay
+              if (
+                (backgroundColor.includes('rgba(0, 0, 0') || backgroundColor.includes('rgb(0, 0, 0)')) &&
+                (opacity === '0.3' || opacity === '0.5' || opacity === '0.7' || opacity === '0.8') &&
+                (zIndex === '1000' || zIndex === '999' || zIndex === '1001' || zIndex === '9999')
+              ) {
+                console.log('🔵 Auto-converting new dark overlay to vibrant blue:', element);
+                (element as HTMLElement).style.background = 'linear-gradient(180deg, #00BFFF 0%, #1E90FF 50%, #4169E1 100%)';
+                (element as HTMLElement).style.opacity = '0.6';
+                (element as HTMLElement).style.zIndex = '1000';
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+          }
+        });
+      });
+    });
+
+    // Start observing for new elements
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    // Cleanup observer on unmount
+    return () => {
+      observer.disconnect();
+    };
   }, []);
-
-
-
-
 
 
 
@@ -4419,6 +4581,47 @@ const Map: React.FC<MapProps> = ({
           {/* Day-Night Cycle */}
           <div style={{ marginBottom: '20px' }}>
             <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Day-Night Cycle</h4>
+            
+            {/* Sky Pattern Selector */}
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#666' }}>Sky Pattern:</label>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setSkyPattern('blue-dominant')}
+              style={{
+                    background: skyPattern === 'blue-dominant' ? '#2196f3' : '#e0e0e0',
+                    color: skyPattern === 'blue-dominant' ? 'white' : '#333',
+                    border: 'none',
+                    padding: '6px 12px',
+                borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    flex: '1 1 calc(50% - 4px)',
+                    minWidth: '120px'
+                  }}
+                >
+                  🌅 Sunset → ☀️ Blue → 🌅 Sunset
+                </button>
+                <button
+                  onClick={() => setSkyPattern('night-dominant')}
+                  style={{
+                    background: skyPattern === 'night-dominant' ? '#2196f3' : '#e0e0e0',
+                    color: skyPattern === 'night-dominant' ? 'white' : '#333',
+                    border: 'none',
+                    padding: '6px 12px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    flex: '1 1 calc(50% - 4px)',
+                    minWidth: '120px'
+                  }}
+                >
+                  🌅 Sunset → 🌙 Night → 🌅 Sunset
+                </button>
+
+              </div>
+          </div>
+
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
               <button
                 onClick={dayNightCycle ? stopDayNightCycle : startDayNightCycle}
@@ -4436,12 +4639,14 @@ const Map: React.FC<MapProps> = ({
                 {dayNightCycle ? 'Stop Cycle' : 'Start Cycle'}
               </button>
             </div>
-            
-            {/* Cycle Progress Indicator */}
+
+                        {/* Cycle Progress Indicator */}
             {dayNightCycle && (
               <div style={{ marginBottom: '8px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-                  <span style={{ flex: '1.0' }}>Continuous Flow</span>
+                  <span style={{ flex: '1.0' }}>
+                    {skyPattern === 'blue-dominant' ? '🌅 Sunset → ☀️ Blue → 🌅 Sunset' : '🌅 Sunset → 🌙 Night → 🌅 Sunset'}
+                  </span>
                 </div>
                 <div style={{ 
                   width: '100%', 
@@ -4453,15 +4658,17 @@ const Map: React.FC<MapProps> = ({
                   <div style={{
                     width: `${(cycleTime / 24) * 100}%`,
                     height: '100%',
-                    background: 'linear-gradient(90deg, #D89060, #3B82F6, #D89060)',
+                    background: skyPattern === 'blue-dominant' 
+                      ? 'linear-gradient(90deg, #D89060, #3B82F6, #D89060)'
+                      : 'linear-gradient(90deg, #D89060, #000000, #D89060)',
                     borderRadius: '4px',
                     transition: 'width 0.1s ease'
                   }} />
                 </div>
                 <div style={{ textAlign: 'center', fontSize: '11px', color: '#666', marginTop: '4px' }}>
                   {Math.round((cycleTime / 24) * 100)}% complete
-                </div>
-                
+          </div>
+
                 {/* Time of Day Indicator */}
                 <div style={{ textAlign: 'center', fontSize: '12px', color: '#333', marginTop: '8px', fontWeight: '500' }}>
                   {getTimeOfDay(cycleTime)}
@@ -4520,6 +4727,7 @@ const Map: React.FC<MapProps> = ({
             >
               Debug Layers
             </button>
+
 
             
             {/* Add the fadeInUp animation CSS */}
