@@ -167,7 +167,7 @@ const Map: React.FC<MapProps> = ({
   const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
   const [worldBuildingColor, setWorldBuildingColor] = useState('#ffffff'); // Default gray color for world buildings
   const [fogColor, setFogColor] = useState('#1E3A8A'); // Default sky color for fog/sky
-  const [skyGradient, setSkyGradient] = useState<'blue' | 'sunset' | 'night'>('night');
+  const [skyGradient, setSkyGradient] = useState<'blue' | 'sunset' | 'night'>('sunset');
   const [dayNightCycle, setDayNightCycle] = useState(true);
   const [cycleTime, setCycleTime] = useState(0); // 0-24 seconds
   const [transitionProgress, setTransitionProgress] = useState(0); // 0-1 for smooth transitions
@@ -413,15 +413,16 @@ const Map: React.FC<MapProps> = ({
     if (gradientType === 'blue') {
       return {
         top: '#1E3A8A',    // Dark blue
-        middle: '#3B82F6', // Medium blue
-        bottom: '#A9D4FF'  // Light blue
+        middle1: '#3B82F6', // Medium blue
+        middle2: '#60A5FA', // Light blue
+        bottom: '#A9D4FF'  // Very light blue
       };
     } else if (gradientType === 'sunset') {
       return {
-        top: '#00008B',    // Very light desaturated pinkish-purple at top
-        middle1: '#00008B', // Soft pink/light peach
-        middle2: '#00008B', // Warm soft orange/peach
-        bottom: '#D89060'  // Deeper muted orange-brown at horizon
+        top: '#45496E',    
+        middle1: '#A0808A', 
+        middle2: '#CC9E8C', 
+        bottom: '#CC9E8C'  
       };
     } else {
       return {
@@ -626,62 +627,133 @@ const Map: React.FC<MapProps> = ({
 
   const changeSkyGradient = (gradientType: 'blue' | 'sunset' | 'night') => {
     console.log('Changing sky gradient to:', gradientType);
+    
+    // Get current and target colors
+    const currentColors = getSkyGradientColors(skyGradient);
+    const targetColors = getSkyGradientColors(gradientType);
+    
+    // Start smooth transition
+    smoothSkyTransition(currentColors, targetColors, gradientType);
+    
     setSkyGradient(gradientType);
-    if (map.current && map.current.isStyleLoaded()) {
-      try {
-        const colors = getSkyGradientColors(gradientType);
-        if (map.current.getLayer('sky')) {
-          if (gradientType === 'sunset') {
+  };
+
+  // Smooth sky transition function
+  const smoothSkyTransition = (fromColors: any, toColors: any, targetGradient: 'blue' | 'sunset' | 'night') => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    const duration = 1500; // 1.5 seconds for smooth transition
+    const steps = 60; // 60 steps for 60fps
+    const stepDuration = duration / steps;
+    let currentStep = 0;
+    
+    const transitionInterval = setInterval(() => {
+      currentStep++;
+      const progress = currentStep / steps;
+      const easedProgress = easeInOutCubic(progress);
+      
+      // Interpolate between colors
+      const interpolatedTop = interpolateColors(fromColors.top, toColors.top, easedProgress);
+      const interpolatedMiddle1 = interpolateColors(fromColors.middle1, toColors.middle1, easedProgress);
+      const interpolatedMiddle2 = interpolateColors(fromColors.middle2, toColors.middle2, easedProgress);
+      const interpolatedBottom = interpolateColors(fromColors.bottom, toColors.bottom, easedProgress);
+      
+      // Apply interpolated colors to sky
+      if (map.current && map.current.getLayer('sky')) {
+        map.current.setPaintProperty('sky', 'sky-gradient', [
+          'interpolate',
+          ['linear'],
+          ['sky-radial-progress'],
+          0.0, interpolatedTop,
+          0.4, interpolatedMiddle1,
+          0.7, interpolatedMiddle2,
+          1.0, interpolatedBottom
+        ]);
+      }
+      
+      // Update background color smoothly
+      if (map.current && map.current.getLayer('background')) {
+        map.current.setPaintProperty('background', 'background-color', interpolatedBottom);
+      }
+      
+      // Handle stars transition
+      if (targetGradient === 'night' && progress > 0.5) {
+        // Start adding stars halfway through transition to night
+        if (map.current && !map.current.getLayer('stars')) {
+          addStars();
+        }
+      } else if (targetGradient !== 'night' && progress > 0.5) {
+        // Start removing stars halfway through transition away from night
+        if (map.current && map.current.getLayer('stars')) {
+          removeStars();
+        }
+      }
+      
+      // Force repaint for smooth animation
+      if (map.current) {
+        map.current.triggerRepaint();
+      }
+      
+      // Complete transition
+      if (currentStep >= steps) {
+        clearInterval(transitionInterval);
+        
+        // Apply final colors to ensure accuracy
+        const finalColors = getSkyGradientColors(targetGradient);
+        if (map.current && map.current.getLayer('sky')) {
+          if (targetGradient === 'sunset') {
             map.current.setPaintProperty('sky', 'sky-gradient', [
               'interpolate',
               ['linear'],
               ['sky-radial-progress'],
-              0.0, colors.top,      // Deep blue at top
-              0.4, colors.middle1,  // Bright blue
-              0.7, colors.middle2,  // Purple-lavender
-              1.0, colors.bottom    // Warmer orange
+              0.0, finalColors.top,
+              0.4, finalColors.middle1,
+              0.7, finalColors.middle2,
+              1.0, finalColors.bottom
             ]);
-          } else if (gradientType === 'night') {
+          } else if (targetGradient === 'night') {
             map.current.setPaintProperty('sky', 'sky-gradient', [
               'interpolate',
               ['linear'],
               ['sky-radial-progress'],
-              0.0, colors.top,      // Deep night blue
-              0.3, colors.middle1,  // Dark blue-purple
-              0.6, colors.middle2,  // Twilight blue
-              1.0, colors.bottom    // Slightly lighter night blue
+              0.0, finalColors.top,
+              0.3, finalColors.middle1,
+              0.6, finalColors.middle2,
+              1.0, finalColors.bottom
             ]);
-            // Add stars for night sky
             addStars();
           } else {
-            // Remove stars for non-night skies
             removeStars();
             map.current.setPaintProperty('sky', 'sky-gradient', [
               'interpolate',
               ['linear'],
               ['sky-radial-progress'],
-              0.0, colors.top,
-              0.5, colors.middle,
-              1.0, colors.bottom
+              0.0, finalColors.top,
+              0.5, finalColors.middle1,
+              1.0, finalColors.bottom
             ]);
           }
         }
-        if (map.current.getLayer('background')) {
-          map.current.setPaintProperty('background', 'background-color', colors.bottom);
+        
+        // Update final background color
+        if (map.current && map.current.getLayer('background')) {
+          map.current.setPaintProperty('background', 'background-color', finalColors.bottom);
         }
+        
         try {
-          map.current.setFog(null); // Completely remove fog/atmospheric haze
+          if (map.current) {
+            map.current.setFog(null);
+          }
         } catch (e) {
           console.log('Could not remove fog effects');
         }
-        map.current.triggerRepaint();
-        console.log('Sky gradient updated immediately');
-      } catch (error) {
-        console.error('Error updating sky gradient:', error);
-        console.log('Falling back to layer reinitialization');
-        setTimeout(() => { initializeLayers(); }, 100);
+        
+        if (map.current) {
+          map.current.triggerRepaint();
+        }
+        console.log('Sky transition completed');
       }
-    }
+    }, stepDuration);
   };
 
   // Smooth easing function for transitions
@@ -894,7 +966,7 @@ const Map: React.FC<MapProps> = ({
             ['linear'],
             ['sky-radial-progress'],
             0.0, colors.top,
-            0.5, colors.middle,
+            0.5, colors.middle1,
             1.0, colors.bottom
           ]);
         }
@@ -1042,7 +1114,7 @@ const Map: React.FC<MapProps> = ({
             ['linear'],
             ['sky-radial-progress'],
             0.0, colors.top,
-            0.5, colors.middle,
+            0.5, colors.middle1,
             1.0, colors.bottom
           ],
           'sky-opacity': 1.0
@@ -3850,6 +3922,33 @@ const Map: React.FC<MapProps> = ({
             }}
           >
             Start Recording
+          </button>
+          <button
+            onClick={() => {
+              const nextGradient = skyGradient === 'blue' ? 'sunset' : skyGradient === 'sunset' ? 'night' : 'blue';
+              changeSkyGradient(nextGradient);
+            }}
+            className="sidepanel-btn"
+            style={{
+              background: skyGradient === 'blue' ? '#e3f2fd' : skyGradient === 'sunset' ? '#fff3e0' : '#f3e5f5',
+              color: '#222',
+              border: '1px solid #e5e7eb',
+              borderRadius: 5,
+              padding: '13px 14px',
+              fontSize: '16px',
+              fontWeight: 500,
+              fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+              cursor: 'pointer',
+              boxShadow: 'none',
+              display: 'block',
+              textAlign: 'center',
+              margin: 0,
+              letterSpacing: 0.2,
+              transition: 'background 0.15s, box-shadow 0.15s, border 0.15s'
+            }}
+            title={`Current: ${skyGradient} sky - Click to cycle`}
+          >
+            {skyGradient === 'blue' ? '☀️ Day' : skyGradient === 'sunset' ? '🌅 Sunset' : '🌙 Night'}
           </button>
         </div>
         {/* Separate toggle button that stays visible when panel is collapsed */}
