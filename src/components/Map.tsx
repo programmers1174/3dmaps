@@ -628,19 +628,94 @@ const Map: React.FC<MapProps> = ({
   const changeSkyGradient = (gradientType: 'blue' | 'sunset' | 'night') => {
     console.log('Changing sky gradient to:', gradientType);
     
+    // Safety check - only transition if map is ready
+    if (!map.current || !map.current.isStyleLoaded()) {
+      console.log('Map not ready, applying colors directly');
+      setSkyGradient(gradientType);
+      return;
+    }
+    
     // Get current and target colors
     const currentColors = getSkyGradientColors(skyGradient);
     const targetColors = getSkyGradientColors(gradientType);
     
     // Start smooth transition
-    smoothSkyTransition(currentColors, targetColors, gradientType);
+    try {
+      smoothSkyTransition(currentColors, targetColors, gradientType);
+    } catch (error) {
+      console.error('Error in smooth transition, falling back to direct change:', error);
+      // Fallback to direct color change
+      applySkyColorsDirectly(gradientType);
+    }
     
     setSkyGradient(gradientType);
   };
 
+  // Fallback function for direct color application
+  const applySkyColorsDirectly = (gradientType: 'blue' | 'sunset' | 'night') => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    try {
+      const colors = getSkyGradientColors(gradientType);
+      if (map.current.getLayer('sky')) {
+        if (gradientType === 'sunset') {
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, colors.top,
+            0.4, colors.middle1,
+            0.7, colors.middle2,
+            1.0, colors.bottom
+          ]);
+        } else if (gradientType === 'night') {
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, colors.top,
+            0.3, colors.middle1,
+            0.6, colors.middle2,
+            1.0, colors.bottom
+          ]);
+          addStars();
+        } else {
+          removeStars();
+          map.current.setPaintProperty('sky', 'sky-gradient', [
+            'interpolate',
+            ['linear'],
+            ['sky-radial-progress'],
+            0.0, colors.top,
+            0.5, colors.middle1,
+            1.0, colors.bottom
+          ]);
+        }
+      }
+      
+      if (map.current.getLayer('background')) {
+        map.current.setPaintProperty('background', 'background-color', colors.bottom);
+      }
+      
+      map.current.triggerRepaint();
+    } catch (error) {
+      console.error('Error applying colors directly:', error);
+    }
+  };
+
   // Smooth sky transition function
   const smoothSkyTransition = (fromColors: any, toColors: any, targetGradient: 'blue' | 'sunset' | 'night') => {
-    if (!map.current || !map.current.isStyleLoaded()) return;
+    // Enhanced safety checks
+    if (!map.current || !map.current.isStyleLoaded()) {
+      console.log('Map not ready for smooth transition');
+      return;
+    }
+    
+    // Validate colors exist
+    if (!fromColors || !toColors || !fromColors.top || !toColors.top) {
+      console.log('Invalid colors for transition, falling back to direct change');
+      applySkyColorsDirectly(targetGradient);
+      return;
+    }
     
     const duration = 1500; // 1.5 seconds for smooth transition
     const steps = 60; // 60 steps for 60fps
@@ -1158,7 +1233,7 @@ const Map: React.FC<MapProps> = ({
             'type': 'raster-dem',
             'url': 'mapbox://mapbox.terrain-rgb',
             'tileSize': 512,
-            'maxzoom': 14
+            'maxzoom': 22
           });
 
           currentMap.setTerrain({
@@ -2415,9 +2490,9 @@ const Map: React.FC<MapProps> = ({
       pitch: 40,
       bearing: -30,
       antialias: true,
-      maxPitch: 85,
-      maxZoom: 24, // maximum allowed by Mapbox
-      minZoom: 0, // minimum allowed
+              maxPitch: 85, // maximum allowed by Mapbox GL JS
+        maxZoom: 24, // maximum allowed by Mapbox
+        minZoom: 0, // minimum allowed
       renderWorldCopies: false
     });
 
@@ -2446,9 +2521,75 @@ const Map: React.FC<MapProps> = ({
     }
 
     // Wait for the style to load before adding custom layers
-    mapInstance.on('style.load', () => {
-      // Add camera path layer
-      mapInstance.addSource('camera-path', {
+          mapInstance.on('style.load', () => {
+        // Add sky layer immediately to prevent white screen
+        try {
+          const colors = getSkyGradientColors(skyGradient);
+          mapInstance.addLayer({
+            'id': 'sky',
+            'type': 'sky',
+            'paint': {
+              'sky-type': 'gradient',
+              'sky-gradient-center': [0, 0],
+              'sky-gradient-radius': 90,
+              'sky-gradient': skyGradient === 'sunset' ? [
+                'interpolate',
+                ['linear'],
+                ['sky-radial-progress'],
+                0.0, colors.top,
+                0.4, colors.middle1,
+                0.7, colors.middle2,
+                1.0, colors.bottom
+              ] : skyGradient === 'night' ? [
+                'interpolate',
+                ['linear'],
+                ['sky-radial-progress'],
+                0.0, colors.top,
+                0.3, colors.middle1,
+                0.6, colors.middle2,
+                1.0, colors.bottom
+              ] : [
+                'interpolate',
+                ['linear'],
+                ['sky-radial-progress'],
+                0.0, colors.top,
+                0.5, colors.middle1,
+                1.0, colors.bottom
+              ],
+              'sky-opacity': 1.0
+            } as any
+          });
+          
+          // Add background layer immediately
+          mapInstance.addLayer({
+            'id': 'background',
+            'type': 'background',
+            'paint': { 'background-color': colors.bottom }
+          }, 'sky');
+          
+          console.log('Sky layer added immediately');
+        } catch (e) {
+          console.log('Could not add sky layer immediately:', e);
+        }
+        
+        // Set maximum render distance and view settings
+        try {
+          // Extend far clip plane for maximum view distance
+          if (mapInstance.getStyle().layers) {
+            mapInstance.setFog({
+              'color': 'rgba(0, 0, 0, 0)', // Transparent fog
+              'high-color': 'rgba(0, 0, 0, 0)', // No high-altitude fog
+              'horizon-blend': 0.1, // Minimal horizon blending
+              'space-color': 'rgba(0, 0, 0, 0)', // No space fog
+              'star-intensity': 0 // Stars handled separately
+            });
+          }
+        } catch (e) {
+          console.log('Could not set advanced fog settings:', e);
+        }
+        
+        // Add camera path layer
+        mapInstance.addSource('camera-path', {
         type: 'geojson',
         data: {
           type: 'Feature',
