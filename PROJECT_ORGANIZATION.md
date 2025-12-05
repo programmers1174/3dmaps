@@ -34,35 +34,6 @@ maps/
   - Refresh 3D features button
   - Debug layers button
 
-### 3. **Custom Building Creation**
-- **Access**: "Design a structure" button
-- **Features**:
-  - Draw custom buildings on map
-  - Set building name, height, color
-  - 3D extrusion rendering
-  - Building management panel
-
-### 4. **Cloud Creation**
-- **Access**: "Make a cloud" button
-- **Features**:
-  - Draw cloud shapes
-  - Always white color
-  - 3D rendering with Three.js
-
-### 5. **3D Model Import**
-- **Access**: "Import 3D Model" button
-- **Features**:
-  - GLTF/GLB file support
-  - Drag and drop placement
-  - Scale and rotation controls
-
-### 6. **Recording & Path Creation**
-- **Access**: "Start Recording" button
-- **Features**:
-  - Create 3D lines on map
-  - Path visualization
-  - Line management panel
-
 ## 🔧 **Key Fixes & Improvements**
 
 ### ✅ **World Building Color Issue (FIXED)**
@@ -131,11 +102,6 @@ const initializeLayers = useCallback(() => {
 - **Layers Affected**: `3d-buildings`, `3d-buildings-simple`
 - **Behavior**: Updates immediately, works with all map styles
 
-### **Custom Building Colors**
-- **State**: `buildingProperties.color` (default: `#808080`)
-- **Usage**: For user-created buildings
-- **Storage**: In `buildings` array
-
 ## 🗂️ **State Management**
 
 ### **Map State**
@@ -151,14 +117,6 @@ const [terrainExaggeration, setTerrainExaggeration] = useState(1);
 ```typescript
 const [showSettings, setShowSettings] = useState(false);
 const [showSidePanel, setShowSidePanel] = useState(true);
-const [showBuildingCreationPanel, setShowBuildingCreationPanel] = useState(false);
-```
-
-### **Building State**
-```typescript
-const [buildings, setBuildings] = useState<Building[]>([]);
-const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
-const [buildingProperties, setBuildingProperties] = useState({...});
 ```
 
 ## 🔍 **Debugging Tools**

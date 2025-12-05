@@ -5,7 +5,6 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 import FreehandMode from 'mapbox-gl-draw-freehand-mode';
 
@@ -23,15 +22,6 @@ interface Layer3D {
   enabled: boolean;
 }
 
-
-interface Model3D {
-  id: string;
-  name: string;
-  url: string;
-  position: [number, number];
-  scale: number;
-  rotation: number;
-}
 
 // New interfaces for film-making features
 interface Scene {
@@ -79,6 +69,7 @@ interface Effect {
   duration: number;
 }
 
+
 const Map: React.FC<MapProps> = ({
   accessToken,
   initialCoordinates = [-122.4194, 37.7749], // San Francisco
@@ -90,27 +81,29 @@ const Map: React.FC<MapProps> = ({
   const map = useRef<mapboxgl.Map | null>(null);
   const [style, setStyle] = useState('mapbox://styles/mapbox/standard');
   const [showSettings, setShowSettings] = useState(false);
-  const [showLabels, setShowLabels] = useState(false);
   const [layers3D, setLayers3D] = useState<Layer3D[]>([
     { id: 'terrain', name: 'Terrain', enabled: true },
     { id: 'buildings', name: '3D Buildings', enabled: true }
   ]);
   const [draw, setDraw] = useState<MapboxDraw | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [models3D, setModels3D] = useState<Model3D[]>([]);
-  const [showModelImport, setShowModelImport] = useState(false);
-  const [isPlacingModel, setIsPlacingModel] = useState(false);
-  const [selectedModelUrl, setSelectedModelUrl] = useState<string>('');
-  const [modelScale, setModelScale] = useState(1);
-  const [modelRotation, setModelRotation] = useState(0);
-  const [isCloudMode, setIsCloudMode] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Game area selection state
+  const [isSelectingGameArea, setIsSelectingGameArea] = useState(false);
+  const [gameAreaBounds, setGameAreaBounds] = useState<mapboxgl.LngLatBounds | null>(null);
+  const [gameAreaPolygon, setGameAreaPolygon] = useState<[number, number][]>([]);
+  const gameAreaPointsRef = useRef<[number, number][]>([]);
+  const gameAreaHandlersRef = useRef<{
+    handleClick?: (e: mapboxgl.MapMouseEvent) => void;
+    handleDoubleClick?: (e: mapboxgl.MapMouseEvent) => void;
+    handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
+    updatePreview?: (points: [number, number][], currentPoint?: [number, number]) => void;
+  }>({});
 
   // New state variables for film-making
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [currentScene, setCurrentScene] = useState<Scene | null>(null);
   const [isRecording, setIsRecording] = useState(false);
-  const [isRecordingPath, setIsRecordingPath] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [showTimeline, setShowTimeline] = useState(false);
@@ -123,13 +116,6 @@ const Map: React.FC<MapProps> = ({
   const [cameraDirectionLayer, setCameraDirectionLayer] = useState<mapboxgl.Layer | null>(null);
   const [isEditingPath, setIsEditingPath] = useState(false);
   const [selectedKeyframe, setSelectedKeyframe] = useState<number | null>(null);
-  const [recordingPoints, setRecordingPoints] = useState<[number, number][]>([]);
-  const [recordingLines, setRecordingLines] = useState<Array<{
-    id: string;
-    start: [number, number];
-    end: [number, number];
-    name: string;
-  }>>([]);
 
 
   const [isSlideshowMode, setIsSlideshowMode] = useState(false);
@@ -147,19 +133,17 @@ const Map: React.FC<MapProps> = ({
   const [sunIntensity, setSunIntensity] = useState(1.0);
   const [sunColor, setSunColor] = useState('#ffffff');
   const [haloColor, setHaloColor] = useState('#ffffff');
-  const [atmosphereColor, setAtmosphereColor] = useState('#ffffff');
-  const [backgroundColor, setBackgroundColor] = useState('#F3E5F5');
+  const [haloOpacity, setHaloOpacity] = useState(1.0);
+  const [atmosphereColor, setAtmosphereColor] = useState('#5FB3FF'); // Bright blue for visible Earth atmosphere
+  const [backgroundColor, setBackgroundColor] = useState('#00b3ff'); // Default blue background
   const [backgroundOpacity, setBackgroundOpacity] = useState(1);
   
   // Sun cycle state
-  const [isSunCycleEnabled, setIsSunCycleEnabled] = useState(false);
+  const [isSunCycleEnabled, setIsSunCycleEnabled] = useState(false); // OFF by default
   const [sunCycleDuration, setSunCycleDuration] = useState(30); // Duration in seconds
   const sunCycleIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCycleRunningRef = useRef(false);
 
-  // Camera angle state for low-angle shots
-  const [cameraPitch, setCameraPitch] = useState(0); // 0-85 degrees (0 = straight down, 85 = nearly horizontal)
-  const [cameraBearing, setCameraBearing] = useState(0); // 0-360 degrees (compass direction)
 
 
 
@@ -168,64 +152,98 @@ const Map: React.FC<MapProps> = ({
 
   const [terrainExaggeration, setTerrainExaggeration] = useState(1);
   const [buildingColor, setBuildingColor] = useState('#ffffff');
-  const [buildingReplacements, setBuildingReplacements] = useState<Array<{
-    id: string;
-    buildingName: string;
-    modelUrl: string;
-    position: [number, number];
-    scale: number;
-    rotation: number;
-    originalBuildingId?: string;
-  }>>([]);
-  const [showBuildingReplacement, setShowBuildingReplacement] = useState(false);
-  const [selectedReplacementBuilding, setSelectedReplacementBuilding] = useState<string>('');
-  const [replacementModelUrl, setReplacementModelUrl] = useState<string>('');
-  const [replacementScale, setReplacementScale] = useState(1);
-  const [replacementRotation, setReplacementRotation] = useState(0);
-  const buildingReplacementFileRef = useRef<HTMLInputElement>(null);
 
-  // 3D Building Designer State
-  const [isBuildingDesignerMode, setIsBuildingDesignerMode] = useState(false);
-  const [customBuildings, setCustomBuildings] = useState<Array<{
+  // Mapbox Features Panel State
+  const [showMapboxFeatures, setShowMapboxFeatures] = useState(false);
+  
+  // Map Styles
+  const [mapStyle, setMapStyle] = useState('mapbox://styles/mapbox/standard');
+  const availableStyles = [
+    { id: 'standard', name: 'Standard', url: 'mapbox://styles/mapbox/standard' },
+    { id: 'streets', name: 'Streets', url: 'mapbox://styles/mapbox/streets-v12' },
+    { id: 'outdoors', name: 'Outdoors', url: 'mapbox://styles/mapbox/outdoors-v12' },
+    { id: 'light', name: 'Light', url: 'mapbox://styles/mapbox/light-v11' },
+    { id: 'dark', name: 'Dark', url: 'mapbox://styles/mapbox/dark-v11' },
+    { id: 'satellite', name: 'Satellite', url: 'mapbox://styles/mapbox/satellite-v9' },
+    { id: 'satellite-streets', name: 'Satellite Streets', url: 'mapbox://styles/mapbox/satellite-streets-v12' },
+    { id: 'navigation-day', name: 'Navigation Day', url: 'mapbox://styles/mapbox/navigation-day-v1' },
+    { id: 'navigation-night', name: 'Navigation Night', url: 'mapbox://styles/mapbox/navigation-night-v1' },
+  ];
+
+  // Navigation Controls
+  const [showZoomControls, setShowZoomControls] = useState(true);
+  const [showCompass, setShowCompass] = useState(true);
+  const [showRotationControls, setShowRotationControls] = useState(true);
+  const [showPitchControls, setShowPitchControls] = useState(true);
+  const [showGeolocation, setShowGeolocation] = useState(false);
+  const [showFullscreen, setShowFullscreen] = useState(false);
+  const [showScale, setShowScale] = useState(true);
+  const [zoomLevel, setZoomLevel] = useState(initialZoom);
+  const [mapRotation, setMapRotation] = useState(0);
+  const [mapPitch, setMapPitch] = useState(0);
+
+  // Fog Controls (careful not to interfere with sky)
+  const [fogEnabled, setFogEnabled] = useState(false);
+  const [fogColor, setFogColor] = useState('#ffffff');
+  const [fogRange, setFogRange] = useState([0.5, 8]);
+  const [fogHighColor, setFogHighColor] = useState('#add8e6');
+  const [fogSpaceColor, setFogSpaceColor] = useState('#000000');
+  const [fogStarIntensity, setFogStarIntensity] = useState(0.35);
+
+  // Terrain Controls
+  const [terrainSource, setTerrainSource] = useState('mapbox-dem');
+  const [terrainEnabled, setTerrainEnabled] = useState(true);
+
+  // Layer Visibility Controls
+  const [trafficLayerVisible, setTrafficLayerVisible] = useState(false);
+  const [transitLayerVisible, setTransitLayerVisible] = useState(false);
+  const [waterLayerVisible, setWaterLayerVisible] = useState(true);
+  const [landuseLayerVisible, setLanduseLayerVisible] = useState(true);
+  const [placeLabelsVisible, setPlaceLabelsVisible] = useState(true);
+  const [poiLabelsVisible, setPoiLabelsVisible] = useState(true);
+  const [roadLabelsVisible, setRoadLabelsVisible] = useState(true);
+  const [transportLabelsVisible, setTransportLabelsVisible] = useState(true);
+
+  // 3D Building Controls
+  const [buildings3DEnabled, setBuildings3DEnabled] = useState(true);
+  const [buildingExtrusionHeight, setBuildingExtrusionHeight] = useState(0);
+  const [buildingOpacity, setBuildingOpacity] = useState(0.8);
+
+  // Marker and Popup Management
+  const [markers, setMarkers] = useState<Array<{
     id: string;
-    name: string;
     position: [number, number];
-    height: number;
-    width: number;
-    length: number;
-    color: string;
-    style: 'box' | 'pyramid' | 'cylinder' | 'tower';
-    rotation: number;
-    points?: [number, number][];
+    popup?: string;
   }>>([]);
-  const [selectedBuilding, setSelectedBuilding] = useState<string | null>(null);
-  const [buildingDesignerProperties, setBuildingDesignerProperties] = useState({
-    height: 50,
-    width: 20,
-    length: 20,
-    color: '#ffffff',
-    style: 'box' as 'box' | 'pyramid' | 'cylinder' | 'tower',
-    rotation: 0
-  });
-  
-  // Point selection for building creation
-  const [isSelectingPoints, setIsSelectingPoints] = useState(false);
-  const [selectedPoints, setSelectedPoints] = useState<[number, number][]>([]);
-  const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
-  const [pointMarkers, setPointMarkers] = useState<mapboxgl.Marker[]>([]);
-  const [isSelectingBuilding, setIsSelectingBuilding] = useState(false);
-  const [selectedBuildingCoords, setSelectedBuildingCoords] = useState<[number, number] | null>(null);
-  const [selectedBuildingName, setSelectedBuildingName] = useState<string>('');
-  
-  // Building editing state
-  const [isEditingBuilding, setIsEditingBuilding] = useState(false);
-  const [editingBuilding, setEditingBuilding] = useState<typeof customBuildings[0] | null>(null);
-  const [editingBuildingProperties, setEditingBuildingProperties] = useState({
-    height: 50,
-    color: '#ffffff',
-    style: 'box' as 'box' | 'pyramid' | 'cylinder' | 'tower',
-    rotation: 0
-  });
+  const [showMarkerTools, setShowMarkerTools] = useState(false);
+
+
+  // Source Management
+  const [customSources, setCustomSources] = useState<Array<{
+    id: string;
+    type: 'geojson' | 'image' | 'video' | 'raster' | 'vector';
+    url?: string;
+    tiles?: string[];
+    data?: any;
+  }>>([]);
+
+  // Language/Localization
+  const [mapLanguage, setMapLanguage] = useState('en');
+  const availableLanguages = [
+    { code: 'en', name: 'English' },
+    { code: 'es', name: 'Spanish' },
+    { code: 'fr', name: 'French' },
+    { code: 'de', name: 'German' },
+    { code: 'it', name: 'Italian' },
+    { code: 'pt', name: 'Portuguese' },
+    { code: 'ru', name: 'Russian' },
+    { code: 'zh', name: 'Chinese' },
+    { code: 'ja', name: 'Japanese' },
+    { code: 'ko', name: 'Korean' },
+  ];
+
+  // Attribution
+  const [showAttribution, setShowAttribution] = useState(true);
 
   // Add new state for panel type
 
@@ -268,36 +286,7 @@ const Map: React.FC<MapProps> = ({
     }
   };
 
-  const toggleLabels = () => {
-    console.log('Toggling labels, current state:', showLabels);
-    if (!map.current) {
-      console.warn('Map not initialized when trying to toggle labels');
-      return;
-    }
-    
-    try {
-      setShowLabels(prev => {
-        const newShowLabels = !prev;
-        const layers = map.current!.getStyle().layers;
-        console.log('Found layers:', layers?.length);
-        
-        layers?.forEach(layer => {
-          if (layer.type === 'symbol') {
-            console.log('Setting visibility for layer:', layer.id);
-            map.current!.setLayoutProperty(
-              layer.id,
-              'visibility',
-              newShowLabels ? 'visible' : 'none'
-            );
-          }
-        });
-        
-        return newShowLabels;
-      });
-    } catch (error) {
-      console.error('Error toggling labels:', error);
-    }
-  };
+  
 
   const changeMapStyle = (newStyle: string) => {
     console.log('Changing map style to:', newStyle);
@@ -341,39 +330,7 @@ const Map: React.FC<MapProps> = ({
             console.log('Re-initializing layers after style change');
             initializeLayers();
             
-            // Restore label visibility
-            if (!showLabels && map.current) {
-              try {
-                const layers = map.current.getStyle().layers;
-                console.log('Restoring label visibility, found layers:', layers?.length);
-                layers?.forEach(layer => {
-                  if (layer.type === 'symbol') {
-                    map.current!.setLayoutProperty(
-                      layer.id,
-                      'visibility',
-                      'none'
-                    );
-                  }
-                  // Hide highway road layers (orange/yellow markings)
-                  if (layer.id && (
-                    layer.id.includes('road') || 
-                    layer.id.includes('highway') || 
-                    layer.id.includes('motorway') || 
-                    layer.id.includes('primary') || 
-                    layer.id.includes('secondary') ||
-                    layer.id.includes('tertiary')
-                  )) {
-                    map.current!.setLayoutProperty(
-                      layer.id,
-                      'visibility',
-                      'none'
-                    );
-                  }
-                });
-              } catch (e) {
-                console.error("Error setting label visibility:", e);
-              }
-            }
+            // Removed duplicate label/road visibility control (managed in the other panel)
 
             // Check if layers were added successfully and retry if needed
             if (attempt < 3) {
@@ -493,6 +450,307 @@ const Map: React.FC<MapProps> = ({
           setTimeout(() => {
             applySkyProperties();
           }, 100);
+    }
+  };
+
+  // Game area selection functions
+  const startGameAreaSelection = () => {
+    if (!map.current) return;
+    
+    // If already selecting, finish the polygon
+    if (isSelectingGameArea) {
+      finishGameAreaSelection();
+      return;
+    }
+    
+    setIsSelectingGameArea(true);
+    setGameAreaPolygon([]);
+    gameAreaPointsRef.current = [];
+    
+    // Create sources and layers for polygon preview
+    if (!map.current.getSource('game-area-preview')) {
+      map.current.addSource('game-area-preview', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [[]]
+          }
+        }
+      });
+    }
+    
+    if (!map.current.getSource('game-area-points')) {
+      map.current.addSource('game-area-points', {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: []
+        }
+      });
+    }
+    
+    if (!map.current.getLayer('game-area-preview')) {
+      map.current.addLayer({
+        id: 'game-area-preview',
+        type: 'fill',
+        source: 'game-area-preview',
+        paint: {
+          'fill-color': '#2196f3',
+          'fill-opacity': 0.2
+        }
+      });
+      
+      map.current.addLayer({
+        id: 'game-area-preview-outline',
+        type: 'line',
+        source: 'game-area-preview',
+        paint: {
+          'line-color': '#2196f3',
+          'line-width': 2,
+          'line-dasharray': [2, 2]
+        }
+      });
+      
+      map.current.addLayer({
+        id: 'game-area-points',
+        type: 'circle',
+        source: 'game-area-points',
+        paint: {
+          'circle-radius': 6,
+          'circle-color': '#2196f3',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+    }
+    
+    const updatePreview = (points: [number, number][], currentPoint?: [number, number]) => {
+      if (!map.current) return;
+      
+      const source = map.current.getSource('game-area-preview') as mapboxgl.GeoJSONSource;
+      const pointsSource = map.current.getSource('game-area-points') as mapboxgl.GeoJSONSource;
+      
+      if (points.length === 0) {
+        if (source) {
+          source.setData({
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[]]
+            }
+          });
+        }
+        if (pointsSource) {
+          pointsSource.setData({
+            type: 'FeatureCollection',
+            features: []
+          });
+        }
+        return;
+      }
+      
+      // Create polygon coordinates (close the polygon)
+      let polygonCoords = [...points];
+      if (currentPoint) {
+        polygonCoords = [...points, currentPoint];
+      }
+      // Close the polygon by adding the first point at the end
+      if (polygonCoords.length > 0) {
+        polygonCoords.push(polygonCoords[0]);
+      }
+      
+      if (source) {
+        source.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [polygonCoords]
+          }
+        });
+      }
+      
+      // Update points
+      if (pointsSource) {
+        pointsSource.setData({
+          type: 'FeatureCollection',
+          features: points.map((point, index) => ({
+            type: 'Feature',
+            properties: { index },
+            geometry: {
+              type: 'Point',
+              coordinates: point
+            }
+          }))
+        });
+      }
+    };
+    
+    const handleClick = (e: mapboxgl.MapMouseEvent) => {
+      e.originalEvent?.preventDefault();
+      e.originalEvent?.stopPropagation();
+      
+      const newPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      gameAreaPointsRef.current = [...gameAreaPointsRef.current, newPoint];
+      setGameAreaPolygon([...gameAreaPointsRef.current]);
+      if (gameAreaHandlersRef.current.updatePreview) {
+        gameAreaHandlersRef.current.updatePreview(gameAreaPointsRef.current);
+      }
+    };
+    
+    const handleDoubleClick = (e: mapboxgl.MapMouseEvent) => {
+      e.originalEvent?.preventDefault();
+      e.originalEvent?.stopPropagation();
+      
+      // Finish the polygon on double click
+      finishGameAreaSelection();
+    };
+    
+    const handleMouseMove = (e: mapboxgl.MapMouseEvent) => {
+      const currentPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      if (gameAreaPointsRef.current.length > 0 && gameAreaHandlersRef.current.updatePreview) {
+        gameAreaHandlersRef.current.updatePreview(gameAreaPointsRef.current, currentPoint);
+      }
+    };
+    
+    // Store handlers and updatePreview in ref
+    gameAreaHandlersRef.current = {
+      handleClick,
+      handleDoubleClick,
+      handleMouseMove,
+      updatePreview
+    };
+    
+    // Add event listeners
+    map.current.on('click', handleClick);
+    map.current.on('dblclick', handleDoubleClick);
+    map.current.on('mousemove', handleMouseMove);
+    
+    // Change cursor to crosshair
+    if (map.current.getCanvas()) {
+      map.current.getCanvas().style.cursor = 'crosshair';
+    }
+  };
+  
+  const finishGameAreaSelection = () => {
+    const points = gameAreaPointsRef.current;
+    if (!map.current || points.length < 3) {
+      alert('Please add at least 3 points to create a polygon');
+      return;
+    }
+    
+    // Calculate bounds from polygon
+    let minLng = Infinity, maxLng = -Infinity;
+    let minLat = Infinity, maxLat = -Infinity;
+    
+    points.forEach(([lng, lat]) => {
+      minLng = Math.min(minLng, lng);
+      maxLng = Math.max(maxLng, lng);
+      minLat = Math.min(minLat, lat);
+      maxLat = Math.max(maxLat, lat);
+    });
+    
+    const bounds = new mapboxgl.LngLatBounds(
+      [minLng, minLat],
+      [maxLng, maxLat]
+    );
+    
+    // Set the map bounds
+    map.current.setMaxBounds(bounds);
+    setGameAreaBounds(bounds);
+    
+    // Store the polygon
+    const closedPolygon = [...points, points[0]]; // Close the polygon
+    
+    // Update the preview to show the final polygon
+    const source = map.current.getSource('game-area-preview') as mapboxgl.GeoJSONSource;
+    if (source) {
+      source.setData({
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [closedPolygon]
+        }
+      });
+    }
+    
+    // Fit map to the selected area
+    map.current.fitBounds(bounds, {
+      padding: 50,
+      duration: 1000
+    });
+    
+    // Remove event listeners
+    if (gameAreaHandlersRef.current.handleClick) {
+      map.current.off('click', gameAreaHandlersRef.current.handleClick);
+    }
+    if (gameAreaHandlersRef.current.handleDoubleClick) {
+      map.current.off('dblclick', gameAreaHandlersRef.current.handleDoubleClick);
+    }
+    if (gameAreaHandlersRef.current.handleMouseMove) {
+      map.current.off('mousemove', gameAreaHandlersRef.current.handleMouseMove);
+    }
+    
+    // Clear handlers
+    gameAreaHandlersRef.current = {};
+    
+    // Exit selection mode
+    setIsSelectingGameArea(false);
+    
+    // Reset cursor
+    if (map.current.getCanvas()) {
+      map.current.getCanvas().style.cursor = '';
+    }
+  };
+
+  const clearGameArea = () => {
+    if (map.current) {
+      // Remove event listeners if in selection mode
+      if (isSelectingGameArea && gameAreaHandlersRef.current) {
+        if (gameAreaHandlersRef.current.handleClick) {
+          map.current.off('click', gameAreaHandlersRef.current.handleClick);
+        }
+        if (gameAreaHandlersRef.current.handleDoubleClick) {
+          map.current.off('dblclick', gameAreaHandlersRef.current.handleDoubleClick);
+        }
+        if (gameAreaHandlersRef.current.handleMouseMove) {
+          map.current.off('mousemove', gameAreaHandlersRef.current.handleMouseMove);
+        }
+        gameAreaHandlersRef.current = {};
+      }
+      
+      map.current.setMaxBounds(undefined as any);
+      setGameAreaBounds(null);
+      setGameAreaPolygon([]);
+      gameAreaPointsRef.current = [];
+      
+      // Clean up preview layers if they exist
+      if (map.current.getLayer('game-area-preview')) {
+        map.current.removeLayer('game-area-preview');
+        map.current.removeLayer('game-area-preview-outline');
+        map.current.removeLayer('game-area-points');
+      }
+      if (map.current.getSource('game-area-preview')) {
+        map.current.removeSource('game-area-preview');
+      }
+      if (map.current.getSource('game-area-points')) {
+        map.current.removeSource('game-area-points');
+      }
+      
+      // Reset cursor
+      if (map.current.getCanvas()) {
+        map.current.getCanvas().style.cursor = '';
+      }
+    }
+    
+    // Exit selection mode if active
+    if (isSelectingGameArea) {
+      setIsSelectingGameArea(false);
     }
   };
 
@@ -636,10 +894,59 @@ const Map: React.FC<MapProps> = ({
       const elapsed = Date.now() - startTime;
       const progress = (elapsed % duration) / duration; // 0 to 1, then resets to 0
       
-        // Consistent pace cycle: Sun moves from 90° to 60° over the full duration
-        const newElevation = 90 - (progress * 30); // 90° to 60° over full cycle
+      // Cycle: 0-37.5% = First half (90° azimuth, 90° to 70° elevation), 37.5-75% = Second half (180° azimuth, 70° to 90° elevation), 75-100% = Night (no sun)
+      let newAzimuth, newElevation;
+      let newHaloOpacity = 1.0;
       
+      if (progress < 0.375) {
+        // First half (0 to 37.5%): Azimuth 90° (East), Elevation goes from 90° to 70°
+        const halfProgress = progress / 0.375; // 0 to 1 within first half
+        newElevation = 90 - (halfProgress * 20); // 90° to 70°
+        newAzimuth = 90;
+        
+        // Halo: Disappear from 80° to 70°
+        if (newElevation <= 80) {
+          const fadeProgress = (80 - newElevation) / 10; // 0 at 80°, 1 at 70°
+          newHaloOpacity = 1.0 - fadeProgress;
+        }
+      } else if (progress < 0.75) {
+        // Second half (37.5 to 75%): Azimuth 180° (South), Elevation goes from 70° to 90°
+        const halfProgress = (progress - 0.375) / 0.375; // 0 to 1 within second half
+        newElevation = 70 + (halfProgress * 20); // 70° to 90°
+        newAzimuth = 180;
+        
+        // Halo: Appear from 70° to 80°
+        if (newElevation <= 80) {
+          const fadeProgress = (newElevation - 70) / 10; // 0 at 70°, 1 at 80°
+          newHaloOpacity = fadeProgress;
+        }
+      } else {
+        // Night (75 to 100%): Hide the sun
+        newAzimuth = 0;
+        newElevation = -90; // Position sun below horizon
+        newHaloOpacity = 0;
+      }
+      
+      // Update state
+      setSunAzimuth(newAzimuth);
       setSunElevation(newElevation);
+      setHaloOpacity(newHaloOpacity);
+      
+      // Apply sky properties immediately for smooth animation even during map interaction
+      if (map.current && map.current.isStyleLoaded()) {
+        try {
+          map.current.setPaintProperty('sky', 'sky-atmosphere-sun', [newAzimuth, newElevation]);
+          
+          // Apply halo color with current opacity
+          const rgb = haloColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 255, 255];
+          const haloColorWithOpacity = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${newHaloOpacity})`;
+          map.current.setPaintProperty('sky', 'sky-atmosphere-halo-color', haloColorWithOpacity);
+          
+          map.current.triggerRepaint();
+        } catch (error) {
+          // Ignore errors during animation
+        }
+      }
 
       // Continue animation
       sunCycleIntervalRef.current = setTimeout(animate, 50); // Update every 50ms for smooth animation
@@ -648,22 +955,6 @@ const Map: React.FC<MapProps> = ({
     animate();
   };
 
-  // Function to apply camera angle changes
-  const applyCameraAngle = () => {
-    if (map.current) {
-      try {
-        // Set the camera pitch (0 = straight down, 85 = nearly horizontal)
-        map.current.setPitch(cameraPitch);
-        
-        // Set the camera bearing (0-360 degrees)
-        map.current.setBearing(cameraBearing);
-        
-        console.log(`Camera angle set: Pitch=${cameraPitch}°, Bearing=${cameraBearing}°`);
-      } catch (error) {
-        console.error('Error setting camera angle:', error);
-      }
-    }
-  };
 
   // Function to apply sky layer properties
   const applySkyProperties = () => {
@@ -675,10 +966,18 @@ const Map: React.FC<MapProps> = ({
         // Apply gradient radius
         map.current.setPaintProperty('sky', 'sky-gradient-radius', skyGradientRadius);
         
-        // Apply sun properties with lighter atmospheric colors
+        // Apply sun properties with enhanced intensity for visible atmosphere
         map.current.setPaintProperty('sky', 'sky-atmosphere-sun', [sunAzimuth, sunElevation]);
-        map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', sunIntensity);
-        map.current.setPaintProperty('sky', 'sky-atmosphere-halo-color', haloColor);
+        // Increase intensity to make atmosphere more visible, especially when zoomed out
+        const currentZoom = map.current.getZoom();
+        const enhancedIntensity = currentZoom < 5 ? Math.max(sunIntensity * 1.5, 2.0) : Math.max(sunIntensity, 1.5);
+        map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', enhancedIntensity);
+        
+        // Apply halo color with current opacity
+        const rgb = haloColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 255, 255];
+        const haloColorWithOpacity = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${haloOpacity})`;
+        map.current.setPaintProperty('sky', 'sky-atmosphere-halo-color', haloColorWithOpacity);
+        
         map.current.setPaintProperty('sky', 'sky-atmosphere-color', atmosphereColor);
         
         // Apply background properties
@@ -1263,7 +1562,11 @@ const Map: React.FC<MapProps> = ({
     try {
       console.log('Adding sky layer, skyLayerType:', skyLayerType, 'skyType:', skyType);
       
-      if (skyLayerType === 'atmosphere') {
+      // Check if we should force space view based on zoom (starts at zoom 9)
+      const currentZoom = currentMap.getZoom();
+      const shouldForceSpaceView = currentZoom < 9;
+      
+      if (shouldForceSpaceView || skyLayerType === 'atmosphere') {
         // Use atmosphere sky type
         currentMap.addLayer({
           'id': 'sky',
@@ -1278,17 +1581,18 @@ const Map: React.FC<MapProps> = ({
           } as any
         });
         
-        // Set background
+        // Set background - force black for space view
+        const bgColor = shouldForceSpaceView ? '#000000' : backgroundColor;
         if (currentMap.getLayer('background')) {
-          currentMap.setPaintProperty('background', 'background-color', backgroundColor);
+          currentMap.setPaintProperty('background', 'background-color', bgColor);
         } else {
           currentMap.addLayer({
             'id': 'background',
             'type': 'background',
-            'paint': { 'background-color': backgroundColor }
+            'paint': { 'background-color': bgColor }
           }, 'sky');
         }
-      } else if (skyType === 'blue') {
+      } else if (!shouldForceSpaceView && skyType === 'blue') {
         // Enhanced blue sky - more vibrant and lively
       currentMap.addLayer({
         'id': 'sky',
@@ -1322,7 +1626,7 @@ const Map: React.FC<MapProps> = ({
             'paint': { 'background-color': '#F3E5F5' }
           }, 'sky');
         }
-      } else if (skyType === 'evening') {
+      } else if (!shouldForceSpaceView && skyType === 'evening') {
         // Enhanced dusk sky - more blue, less orange
         currentMap.addLayer({
           'id': 'sky',
@@ -1358,7 +1662,7 @@ const Map: React.FC<MapProps> = ({
             'paint': { 'background-color': '#C4B5FD' }
           }, 'sky');
         }
-      } else if (skyType === 'night') {
+      } else if (!shouldForceSpaceView && skyType === 'night') {
         // Night sky
         currentMap.addLayer({
           'id': 'sky',
@@ -1395,7 +1699,7 @@ const Map: React.FC<MapProps> = ({
         setTimeout(() => {
           addStars();
         }, 500);
-      } else if (skyType === 'sunrise') {
+      } else if (!shouldForceSpaceView && skyType === 'sunrise') {
         // Sunrise sky (less blue, warmer tones)
         currentMap.addLayer({
           'id': 'sky',
@@ -1614,289 +1918,6 @@ const Map: React.FC<MapProps> = ({
     }
   }, []);
 
-  // 3D Building Designer Functions
-  const addCustomBuilding = useCallback((points: [number, number][]) => {
-    if (points.length < 3) return; // Need at least 3 points for a polygon
-    
-    // Calculate center point
-    const centerLng = points.reduce((sum, point) => sum + point[0], 0) / points.length;
-    const centerLat = points.reduce((sum, point) => sum + point[1], 0) / points.length;
-    
-    const newBuilding = {
-      id: `custom-building-${Date.now()}`,
-      name: `Building ${customBuildings.length + 1}`,
-      position: [centerLng, centerLat] as [number, number],
-      height: buildingDesignerProperties.height,
-      width: buildingDesignerProperties.width,
-      length: buildingDesignerProperties.length,
-      color: buildingDesignerProperties.color,
-      style: buildingDesignerProperties.style,
-      rotation: buildingDesignerProperties.rotation,
-      points: points // Store the original points for rendering
-    };
-    
-    setCustomBuildings(prev => [...prev, newBuilding]);
-    setSelectedBuilding(newBuilding.id);
-    setSelectedPoints([]);
-    setIsSelectingPoints(false);
-    setIsCreatingBuilding(false);
-    clearPointMarkers(); // Clear visual markers
-    console.log('Added custom building:', newBuilding);
-  }, [customBuildings.length, buildingDesignerProperties]);
-
-  const updateCustomBuilding = useCallback((buildingId: string, updates: Partial<typeof customBuildings[0]>) => {
-    setCustomBuildings(prev => 
-      prev.map(building => 
-        building.id === buildingId 
-          ? { ...building, ...updates }
-          : building
-      )
-    );
-  }, []);
-
-  const deleteCustomBuilding = useCallback((buildingId: string) => {
-    setCustomBuildings(prev => prev.filter(building => building.id !== buildingId));
-    if (selectedBuilding === buildingId) {
-      setSelectedBuilding(null);
-    }
-    // Exit edit mode if deleting the building being edited
-    if (editingBuilding?.id === buildingId) {
-      setIsEditingBuilding(false);
-      setEditingBuilding(null);
-    }
-  }, [selectedBuilding, editingBuilding]);
-
-  // Function to start editing a building
-  const startEditingBuilding = useCallback((building: typeof customBuildings[0]) => {
-    setEditingBuilding(building);
-    setEditingBuildingProperties({
-      height: building.height,
-      color: building.color,
-      style: building.style,
-      rotation: building.rotation
-    });
-    setIsEditingBuilding(true);
-    setSelectedBuilding(building.id);
-  }, []);
-
-  // Function to save building changes
-  const saveBuildingChanges = useCallback(() => {
-    if (!editingBuilding) return;
-
-    const updatedBuilding = {
-      ...editingBuilding,
-      height: editingBuildingProperties.height,
-      color: editingBuildingProperties.color,
-      style: editingBuildingProperties.style,
-      rotation: editingBuildingProperties.rotation
-    };
-
-    setCustomBuildings(prev => 
-      prev.map(building => 
-        building.id === editingBuilding.id ? updatedBuilding : building
-      )
-    );
-
-    setIsEditingBuilding(false);
-    setEditingBuilding(null);
-    console.log('Building updated:', updatedBuilding);
-  }, [editingBuilding, editingBuildingProperties]);
-
-  // Function to cancel editing
-  const cancelEditingBuilding = useCallback(() => {
-    setIsEditingBuilding(false);
-    setEditingBuilding(null);
-  }, []);
-
-  // Function to create visual markers for selected points
-  const createPointMarker = useCallback((coords: [number, number], pointNumber: number) => {
-    if (!map.current) return null;
-
-    // Create marker element
-    const markerElement = document.createElement('div');
-    markerElement.style.width = '24px';
-    markerElement.style.height = '24px';
-    markerElement.style.borderRadius = '50%';
-    markerElement.style.backgroundColor = '#1976d2';
-    markerElement.style.border = '3px solid white';
-    markerElement.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
-    markerElement.style.display = 'flex';
-    markerElement.style.alignItems = 'center';
-    markerElement.style.justifyContent = 'center';
-    markerElement.style.color = 'white';
-    markerElement.style.fontSize = '12px';
-    markerElement.style.fontWeight = 'bold';
-    markerElement.style.cursor = 'pointer';
-    markerElement.textContent = pointNumber.toString();
-
-    // Create marker
-    const marker = new mapboxgl.Marker(markerElement)
-      .setLngLat(coords)
-      .addTo(map.current);
-
-    return marker;
-  }, []);
-
-  // Function to clear all point markers
-  const clearPointMarkers = useCallback(() => {
-    pointMarkers.forEach(marker => marker.remove());
-    setPointMarkers([]);
-    
-    // Clear preview line
-    if (map.current) {
-      if (map.current.getLayer('preview-line')) {
-        map.current.removeLayer('preview-line');
-      }
-      if (map.current.getSource('preview-line')) {
-        map.current.removeSource('preview-line');
-      }
-    }
-  }, [pointMarkers]);
-
-  // Function to update preview line for selected points
-  const updatePreviewLine = useCallback(() => {
-    if (!map.current) return;
-
-    // Remove existing preview line
-    if (map.current.getLayer('preview-line')) {
-      map.current.removeLayer('preview-line');
-    }
-    if (map.current.getSource('preview-line')) {
-      map.current.removeSource('preview-line');
-    }
-
-    // Add preview line if we have 2+ points
-    if (selectedPoints.length >= 2) {
-      const lineCoordinates = selectedPoints.length >= 3 
-        ? [...selectedPoints, selectedPoints[0]] // Close the polygon
-        : selectedPoints; // Just connect the points
-
-      map.current.addSource('preview-line', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: lineCoordinates
-          }
-        }
-      });
-
-      map.current.addLayer({
-        id: 'preview-line',
-        type: 'line',
-        source: 'preview-line',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round'
-        },
-        paint: {
-          'line-color': '#1976d2',
-          'line-width': 3,
-          'line-opacity': 0.8
-        }
-      });
-    }
-  }, [selectedPoints]);
-
-  const handleMapClickForBuilding = useCallback((e: mapboxgl.MapMouseEvent) => {
-    if (isBuildingDesignerMode && isSelectingPoints) {
-      const coords = [e.lngLat.lng, e.lngLat.lat] as [number, number];
-      const newPoints = [...selectedPoints, coords];
-      setSelectedPoints(newPoints);
-      
-      // Create visual marker for the new point
-      const marker = createPointMarker(coords, newPoints.length);
-      if (marker) {
-        setPointMarkers(prev => [...prev, marker]);
-      }
-      
-      // Update preview line
-      setTimeout(() => updatePreviewLine(), 100);
-      
-      console.log('Added point:', coords, 'Total points:', newPoints.length);
-    }
-  }, [isBuildingDesignerMode, isSelectingPoints, selectedPoints, createPointMarker]);
-
-  // Function to render custom buildings on the map
-  const renderCustomBuildings = useCallback(() => {
-    if (!map.current || customBuildings.length === 0) return;
-
-    // Remove existing custom building layers
-    if (map.current.getLayer('custom-buildings-fill')) {
-      map.current.removeLayer('custom-buildings-fill');
-    }
-    if (map.current.getLayer('custom-buildings-outline')) {
-      map.current.removeLayer('custom-buildings-outline');
-    }
-    if (map.current.getSource('custom-buildings')) {
-      map.current.removeSource('custom-buildings');
-    }
-
-    // Create GeoJSON data for custom buildings
-    const features = customBuildings.map(building => ({
-      type: 'Feature' as const,
-      properties: {
-        id: building.id,
-        name: building.name,
-        height: building.height,
-        width: building.width,
-        length: building.length,
-        color: building.color,
-        style: building.style,
-        rotation: building.rotation
-      },
-      geometry: {
-        type: 'Polygon' as const,
-        coordinates: building.points ? [building.points.concat([building.points[0]])] : [[
-          [building.position[0] - building.width/2/111000, building.position[1] - building.length/2/111000],
-          [building.position[0] + building.width/2/111000, building.position[1] - building.length/2/111000],
-          [building.position[0] + building.width/2/111000, building.position[1] + building.length/2/111000],
-          [building.position[0] - building.width/2/111000, building.position[1] + building.length/2/111000],
-          [building.position[0] - building.width/2/111000, building.position[1] - building.length/2/111000]
-        ]]
-      }
-    }));
-
-    const geojson = {
-      type: 'FeatureCollection' as const,
-      features
-    };
-
-    // Add source
-    map.current.addSource('custom-buildings', {
-      type: 'geojson',
-      data: geojson
-    });
-
-    // Add fill layer
-    map.current.addLayer({
-      id: 'custom-buildings-fill',
-      type: 'fill-extrusion',
-      source: 'custom-buildings',
-      paint: {
-        'fill-extrusion-color': ['get', 'color'],
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-base': 0,
-        'fill-extrusion-opacity': 0.8
-      }
-    });
-
-    // Add outline layer
-    map.current.addLayer({
-      id: 'custom-buildings-outline',
-      type: 'line',
-      source: 'custom-buildings',
-      paint: {
-        'line-color': '#000',
-        'line-width': 2,
-        'line-opacity': 0.6
-      }
-    });
-
-    console.log('Rendered custom buildings:', customBuildings.length);
-  }, [customBuildings]);
 
   // Add this useEffect to ensure layers are initialized when the map is ready
   useEffect(() => {
@@ -1919,14 +1940,20 @@ const Map: React.FC<MapProps> = ({
     if (map.current && map.current.isStyleLoaded()) {
       applySkyProperties();
     }
-  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, atmosphereColor, backgroundColor, backgroundOpacity]);
+  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]);
 
-  // Apply camera angle when it changes
+  // Auto-start sun cycle when enabled by default
   useEffect(() => {
-    if (map.current) {
-      applyCameraAngle();
+    if (map.current && map.current.isStyleLoaded() && isSunCycleEnabled && !isCycleRunningRef.current) {
+      // Wait a bit for everything to initialize, then start
+      setTimeout(() => {
+        if (map.current && isSunCycleEnabled && !isCycleRunningRef.current) {
+          isCycleRunningRef.current = true;
+          startSunCycle();
+        }
+      }, 1500);
     }
-  }, [cameraPitch, cameraBearing]);
+  }, [map.current, isSunCycleEnabled]);
 
   // Restart sun cycle when duration changes
   useEffect(() => {
@@ -1945,12 +1972,6 @@ const Map: React.FC<MapProps> = ({
     };
   }, []);
 
-  // Render custom buildings when they change
-  useEffect(() => {
-    if (map.current && map.current.isStyleLoaded()) {
-      renderCustomBuildings();
-    }
-  }, [customBuildings, renderCustomBuildings]);
 
 
 
@@ -2072,66 +2093,6 @@ const Map: React.FC<MapProps> = ({
 
 
 
-  // Function to handle model import
-  const handleModelImport = () => {
-    if (fileInputRef.current) {
-      fileInputRef.current.click();
-    }
-  };
-
-  // Function to handle file selection
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    // Create a local URL for the file
-    const modelUrl = URL.createObjectURL(file);
-    setSelectedModelUrl(modelUrl);
-    setIsPlacingModel(true);
-    setShowModelImport(false);
-
-    // Switch to drawing mode for placement
-    if (draw && map.current) {
-      draw.changeMode('draw_polygon');
-      
-      // Listen for the draw.create event
-      map.current.once('draw.create', (e: any) => {
-        const feature = e.features[0];
-        const coordinates = feature.geometry.coordinates[0];
-        
-        // Calculate center point of the drawn area
-        const center = coordinates.reduce(
-          (acc: [number, number], coord: [number, number]) => [
-            acc[0] + coord[0] / coordinates.length,
-            acc[1] + coord[1] / coordinates.length
-          ],
-          [0, 0]
-        );
-
-        const modelName = prompt('What would you like to name this model?') || `Model ${models3D.length + 1}`;
-        
-        setModels3D(prev => [
-          ...prev,
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            name: modelName,
-            url: modelUrl,
-            position: center as [number, number],
-            scale: modelScale * 1000, // Increase scale further
-            rotation: modelRotation
-          }
-        ]);
-
-        // Delete the drawn polygon
-        draw.delete(feature.id);
-        setIsPlacingModel(false);
-        setSelectedModelUrl('');
-      });
-    }
-
-    // Reset the file input
-    event.target.value = '';
-  };
 
   // Recording functions
   const startRecording = async () => {
@@ -2759,7 +2720,8 @@ const Map: React.FC<MapProps> = ({
       // Find the closest keyframe
       const clickedLngLat = e.lngLat;
       const closestKeyframe = currentScene.cameraPath.reduce((closest, keyframe, index) => {
-        const keyframePoint = map.current!.project([keyframe.position[0], keyframe.position[1]]);
+        if (!map.current) return closest;
+        const keyframePoint = map.current.project([keyframe.position[0], keyframe.position[1]]);
         const distance = Math.sqrt(
           Math.pow(keyframePoint.x - point.x, 2) + 
           Math.pow(keyframePoint.y - point.y, 2)
@@ -2811,215 +2773,507 @@ const Map: React.FC<MapProps> = ({
     </div>
   );
 
-  const lineCreationGuard = useRef(false);
 
-  const handleStartRecording = () => {
-    if (!map.current) return;
-    setRecordingPoints([]);
-    setIsRecordingPath(true);
-    lineCreationGuard.current = false; // Reset guard for new session
-  };
-
-  // Define create3DLine before handleMapClick
-  const create3DLine = (line: { id: string; start: [number, number]; end: [number, number]; name: string }) => {
-    if (!map.current) return;
-    
-    try {
-      console.log('Creating 3D line:', line);
-      
-      // Create a polygon from the line for 3D extrusion
-      const baseWidth = 0.00001; // Base width for the line
-      const lineHeight = 50; // Height of the line in meters
-      
-      // Calculate perpendicular offset for the line
-      const dx = line.end[0] - line.start[0];
-      const dy = line.end[1] - line.start[1];
-      const length = Math.sqrt(dx * dx + dy * dy);
-      const perpX = -dy / length * baseWidth;
-      const perpY = dx / length * baseWidth;
-      
-      // Create polygon coordinates for the line
-      const polygonCoords = [
-        [line.start[0] + perpX, line.start[1] + perpY],
-        [line.start[0] - perpX, line.start[1] - perpY],
-        [line.end[0] - perpX, line.end[1] - perpY],
-        [line.end[0] + perpX, line.end[1] + perpY],
-        [line.start[0] + perpX, line.start[1] + perpY] // Close the polygon
-      ];
-      
-      // Create polygon feature for the line
-      const polygonFeature: GeoJSON.Feature<GeoJSON.Polygon> = {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'Polygon',
-          coordinates: [polygonCoords]
-        }
-      };
-
-      // Add source for the line
-      map.current.addSource(`recording-path-${line.id}`, {
-        type: 'geojson',
-        data: polygonFeature
-      });
-
-      // Add the 3D line layer
-      map.current.addLayer({
-        id: `recording-path-${line.id}`,
-        type: 'fill-extrusion',
-        source: `recording-path-${line.id}`,
-        paint: {
-          'fill-extrusion-color': 'worldBuildingColor',
-          'fill-extrusion-height': lineHeight,
-          'fill-extrusion-base': lineHeight,
-          'fill-extrusion-opacity': 1,
-          'fill-extrusion-vertical-gradient': true
-        }
-      });
-
-      // Helper to create a small square polygon at a point
-      const makeSquare = (center: [number, number], size: number) => {
-        return [
-          [center[0] - size, center[1] - size],
-          [center[0] + size, center[1] - size],
-          [center[0] + size, center[1] + size],
-          [center[0] - size, center[1] + size],
-          [center[0] - size, center[1] - size]
-        ];
-      };
-      const markerSize = 0.00004; // Slightly larger than line width
-
-      // Start endpoint 3D marker
-      const startSquare = makeSquare(line.start, markerSize);
-      map.current.addSource(`recording-path-endpoint-start-${line.id}`, {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'Polygon',
-            coordinates: [startSquare]
-          }
-        }
-      });
-      map.current.addLayer({
-        id: `recording-path-endpoint-start-${line.id}`,
-        type: 'fill-extrusion',
-        source: `recording-path-endpoint-start-${line.id}`,
-        paint: {
-          'fill-extrusion-color': '#0074D9', // Blue
-          'fill-extrusion-height': lineHeight,
-          'fill-extrusion-base': lineHeight,
-          'fill-extrusion-opacity': 1,
-          'fill-extrusion-vertical-gradient': false
-        }
-      });
-
-      // End endpoint 3D marker
-      const endSquare = makeSquare(line.end, markerSize);
-      map.current.addSource(`recording-path-endpoint-end-${line.id}`, {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'Polygon',
-            coordinates: [endSquare]
-          }
-        }
-      });
-      map.current.addLayer({
-        id: `recording-path-endpoint-end-${line.id}`,
-        type: 'fill-extrusion',
-        source: `recording-path-endpoint-end-${line.id}`,
-        paint: {
-          'fill-extrusion-color': '#0074D9', // Blue
-          'fill-extrusion-height': lineHeight,
-          'fill-extrusion-base': lineHeight,
-          'fill-extrusion-opacity': 1,
-          'fill-extrusion-vertical-gradient': false
-        }
-      });
-
-      console.log('Line creation complete');
-    } catch (error) {
-      console.error('Error creating 3D line:', error);
-    }
-  };
-
-  // Memoize handleMapClick so it is stable between renders
-  const handleMapClick = React.useCallback((e: mapboxgl.MapMouseEvent) => {
-    if (!isRecordingPath || !map.current) return;
-    if (lineCreationGuard.current) return; // Prevent double creation
-
-    const coordinates: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-    setRecordingPoints(prev => {
-      const newPoints = [...prev, coordinates];
-      if (newPoints.length === 2) {
-        if (map.current) {
-          lineCreationGuard.current = true; // Set guard before prompt
-          const lineId = `line-${Date.now()}`;
-          const lineName = prompt('What would you like to name this line?') || `Line ${Date.now()}`;
-          const newLine = {
-            id: lineId,
-            start: newPoints[0],
-            end: newPoints[1],
-            name: lineName
-          };
-          create3DLine(newLine);
-          setRecordingPoints([]);
-          setIsRecordingPath(false);
-          map.current.off('click', handleMapClick);
-          setRecordingLines(prev => [...prev, newLine]);
-        }
-      }
-      return newPoints;
-    });
-  }, [isRecordingPath]);
-
-  // Register/unregister the click handler only when isRecordingPath changes
+  // Implement Mapbox Features - Navigation Controls
   useEffect(() => {
     if (!map.current) return;
-    if (isRecordingPath) {
-      map.current.on('click', handleMapClick);
+
+    // Wait for style to load
+    const setupControls = () => {
+      try {
+        // Remove existing controls
+        if (navControlRef.current && map.current) {
+          try { map.current.removeControl(navControlRef.current); } catch (e) {
+            // Control may not exist, ignore error
+          }
+          navControlRef.current = null;
+        }
+        if (geolocateControlRef.current && map.current) {
+          try { map.current.removeControl(geolocateControlRef.current); } catch (e) {
+            // Control may not exist, ignore error
+          }
+          geolocateControlRef.current = null;
+        }
+        if (fullscreenControlRef.current && map.current) {
+          try { map.current.removeControl(fullscreenControlRef.current); } catch (e) {
+            // Control may not exist, ignore error
+          }
+          fullscreenControlRef.current = null;
+        }
+        if (scaleControlRef.current && map.current) {
+          try { map.current.removeControl(scaleControlRef.current); } catch (e) {
+            // Control may not exist, ignore error
+          }
+          scaleControlRef.current = null;
+        }
+
+        // Add navigation controls based on state
+        if (!map.current) return;
+        
+        if (showZoomControls || showCompass || showRotationControls || showPitchControls) {
+          const navControl = new mapboxgl.NavigationControl({
+            showZoom: showZoomControls,
+            showCompass: showCompass,
+            visualizePitch: showPitchControls
+          });
+          map.current.addControl(navControl, 'top-right');
+          navControlRef.current = navControl;
+        }
+
+        if (showGeolocation) {
+          const geolocate = new mapboxgl.GeolocateControl({
+            positionOptions: { enableHighAccuracy: true },
+            trackUserLocation: true
+          });
+          map.current.addControl(geolocate, 'top-right');
+          geolocateControlRef.current = geolocate;
+        }
+
+        if (showFullscreen) {
+          const fullscreen = new mapboxgl.FullscreenControl();
+          map.current.addControl(fullscreen, 'top-right');
+          fullscreenControlRef.current = fullscreen;
+        }
+
+        if (showScale) {
+          const scale = new mapboxgl.ScaleControl();
+          map.current.addControl(scale, 'bottom-right');
+          scaleControlRef.current = scale;
+        }
+      } catch (e) {
+        console.warn('Error managing navigation controls:', e);
+      }
+    };
+
+    if (map.current.isStyleLoaded()) {
+      setupControls();
+    } else {
+      map.current.once('style.load', setupControls);
     }
+
+    return () => {
+      if (map.current && !(map.current as any)._removed) {
+        try {
+          if (navControlRef.current) map.current.removeControl(navControlRef.current);
+          if (geolocateControlRef.current) map.current.removeControl(geolocateControlRef.current);
+          if (fullscreenControlRef.current) map.current.removeControl(fullscreenControlRef.current);
+          if (scaleControlRef.current) map.current.removeControl(scaleControlRef.current);
+        } catch (e) {
+          // Controls may not exist, ignore error
+        }
+      }
+    };
+  }, [showZoomControls, showCompass, showRotationControls, showPitchControls, showGeolocation, showFullscreen, showScale]);
+
+
+  // Implement Fog (careful not to interfere with sky)
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    try {
+      if (fogEnabled && map.current.getLayer('sky')) {
+        // Only add fog if sky exists and we want fog
+        const fogLayer = map.current.getLayer('fog');
+        if (!fogLayer) {
+          (map.current.addLayer as any)({
+            id: 'fog',
+            type: 'fog',
+            paint: {
+              'fog-color': fogColor,
+              'fog-high-color': fogHighColor,
+              'fog-space-color': fogSpaceColor,
+              'fog-star-intensity': fogStarIntensity,
+              'fog-range': fogRange,
+              'fog-horizon-blend': 0.1
+            }
+          }, 'sky');
+        } else {
+          (map.current.setPaintProperty as any)('fog', 'fog-color', fogColor);
+          (map.current.setPaintProperty as any)('fog', 'fog-high-color', fogHighColor);
+          (map.current.setPaintProperty as any)('fog', 'fog-space-color', fogSpaceColor);
+          (map.current.setPaintProperty as any)('fog', 'fog-star-intensity', fogStarIntensity);
+          (map.current.setPaintProperty as any)('fog', 'fog-range', fogRange);
+        }
+      } else {
+        // Remove fog layer if disabled
+        if (map.current.getLayer('fog')) {
+          map.current.removeLayer('fog');
+        }
+      }
+    } catch (e) {
+      console.warn('Fog layer management error:', e);
+    }
+  }, [fogEnabled, fogColor, fogHighColor, fogSpaceColor, fogStarIntensity, fogRange]);
+
+  // Implement Terrain
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    try {
+      if (terrainEnabled && terrainSource === 'mapbox-dem') {
+        // Check if source exists, if not add it
+        if (!map.current.getSource('mapbox-dem')) {
+          map.current.addSource('mapbox-dem', {
+            type: 'raster-dem',
+            url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+            tileSize: 512,
+            maxzoom: 14
+          });
+        }
+        
+        // Set terrain with current exaggeration
+        (map.current as any).setTerrain({ 
+          source: 'mapbox-dem', 
+          exaggeration: terrainExaggeration 
+        });
+      } else {
+        // Remove terrain if disabled
+        (map.current as any).setTerrain(null);
+      }
+    } catch (e) {
+      console.warn('Terrain management error:', e);
+    }
+  }, [terrainEnabled, terrainSource, terrainExaggeration]);
+
+  // Implement Layer Visibility
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    const toggleLayerVisibility = (layerId: string, visible: boolean) => {
+      try {
+        if (!map.current) return;
+        const layer = map.current.getLayer(layerId);
+        if (layer) {
+          map.current.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+        }
+      } catch (e) {
+        // Layer might not exist in current style
+      }
+    };
+
+    const style = map.current.getStyle();
+    if (style && style.layers) {
+      style.layers.forEach((layer: any) => {
+        const layerId = layer.id.toLowerCase();
+        
+        // Traffic layers
+        if (layerId.includes('traffic')) {
+          toggleLayerVisibility(layer.id, trafficLayerVisible);
+        }
+        // Transit layers (but not transit labels - those are handled separately)
+        if (layerId.includes('transit') && layer.type !== 'symbol') {
+          toggleLayerVisibility(layer.id, transitLayerVisible);
+        }
+        // Water layers (but not labels or boundaries)
+        if ((layerId.includes('water') || layerId.includes('ocean') || layerId.includes('sea')) && 
+            !layerId.includes('label') && !layerId.includes('boundary') && layer.type !== 'symbol') {
+          toggleLayerVisibility(layer.id, waterLayerVisible);
+        }
+        // Landuse layers
+        if (layerId.includes('landuse') || layerId.includes('landcover')) {
+          toggleLayerVisibility(layer.id, landuseLayerVisible);
+        }
+        // Place labels (city, town, etc.)
+        if ((layerId.includes('place') || layerId.includes('city') || layerId.includes('town')) && 
+            layer.type === 'symbol') {
+          toggleLayerVisibility(layer.id, placeLabelsVisible);
+        }
+        // POI labels
+        if (layerId.includes('poi') && layer.type === 'symbol') {
+          toggleLayerVisibility(layer.id, poiLabelsVisible);
+        }
+        // Road labels
+        if (layerId.includes('road') && layerId.includes('label') && layer.type === 'symbol') {
+          toggleLayerVisibility(layer.id, roadLabelsVisible);
+        }
+        // Transport labels
+        if (layerId.includes('transit') && layer.type === 'symbol') {
+          toggleLayerVisibility(layer.id, transportLabelsVisible);
+        }
+      });
+    }
+  }, [trafficLayerVisible, transitLayerVisible, waterLayerVisible, landuseLayerVisible, placeLabelsVisible, poiLabelsVisible, roadLabelsVisible, transportLabelsVisible]);
+
+  // Re-run layer visibility when style loads
+  useEffect(() => {
+    if (!map.current) return;
+    
+    const handleStyleLoad = () => {
+      // Trigger layer visibility update by setting state (will trigger the useEffect above)
+      if (map.current && map.current.isStyleLoaded()) {
+        // Force a re-render of layer visibility
+        setTimeout(() => {
+          setTrafficLayerVisible(trafficLayerVisible);
+        }, 100);
+      }
+    };
+
+    map.current.on('style.load', handleStyleLoad);
+    return () => {
+      if (map.current && !(map.current as any)._removed) {
+        map.current.off('style.load', handleStyleLoad);
+      }
+    };
+  }, []);
+
+  // Implement 3D Buildings
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    try {
+      const currentMap = map.current;
+      if (!currentMap) return;
+      const style = currentMap.getStyle();
+      if (style && style.layers) {
+        style.layers.forEach((layer: any) => {
+          if (layer.type === 'fill-extrusion') {
+            const layerId = layer.id.toLowerCase();
+            if (layerId.includes('building') || layerId.includes('extrusion')) {
+              currentMap.setLayoutProperty(layer.id, 'visibility', buildings3DEnabled ? 'visible' : 'none');
+              
+              // Get current height expression or use buildingExtrusionHeight
+              const currentHeight = layer.paint?.['fill-extrusion-height'];
+              if (buildingExtrusionHeight > 0 && typeof currentHeight === 'number') {
+                // If it's a simple number, we can override it
+                currentMap.setPaintProperty(layer.id, 'fill-extrusion-height', buildingExtrusionHeight);
+              } else if (buildingExtrusionHeight > 0) {
+                // If it's an expression (like ['get', 'height']), we can't easily override
+                // But we can set a base height
+                try {
+                  currentMap.setPaintProperty(layer.id, 'fill-extrusion-base', 0);
+                } catch (e) {
+                  // Ignore if can't set base
+                }
+              }
+              currentMap.setPaintProperty(layer.id, 'fill-extrusion-opacity', buildingOpacity);
+            }
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('3D Building management error:', e);
+    }
+  }, [buildings3DEnabled, buildingExtrusionHeight, buildingOpacity]);
+
+  // Re-run 3D buildings when style loads
+  useEffect(() => {
+    if (!map.current) return;
+    
+    const handleStyleLoad = () => {
+      if (map.current && map.current.isStyleLoaded()) {
+        setTimeout(() => {
+          setBuildings3DEnabled(buildings3DEnabled);
+        }, 100);
+      }
+    };
+
+    map.current.on('style.load', handleStyleLoad);
+    return () => {
+      if (map.current && !(map.current as any)._removed) {
+        map.current.off('style.load', handleStyleLoad);
+      }
+    };
+  }, []);
+
+  // Sync zoom, rotation, pitch from map and enhance atmosphere when zoomed out
+  useEffect(() => {
+    if (!map.current) return;
+    
+    const updateMapState = () => {
+      if (!map.current) return;
+      const currentZoom = map.current.getZoom();
+      setZoomLevel(currentZoom);
+      setMapRotation(map.current.getBearing());
+      setMapPitch(map.current.getPitch());
+
+      // Gradually transition to black space with stars as zoom decreases below 9
+      if (map.current.isStyleLoaded() && map.current.getLayer('sky')) {
+        try {
+          const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [95, 179, 255];
+          
+          if (currentZoom < 9) {
+            // Calculate transition progress (0 at zoom 9, 1 at zoom 0)
+            // Smooth transition from zoom 9 down to zoom 0
+            const transitionProgress = Math.max(0, Math.min(1, (9 - currentZoom) / 9));
+            
+            if (!map.current) return;
+            // Force sky to atmosphere mode for space view
+            map.current.setPaintProperty('sky', 'sky-type', 'atmosphere');
+            map.current.setPaintProperty('sky', 'sky-atmosphere-sun', [sunAzimuth, sunElevation]);
+            
+            // Gradually increase sun intensity as we zoom out
+            const intensityMultiplier = 1.5 + (transitionProgress * 1.0); // 1.5x at zoom 9, 2.5x at zoom 0
+            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity * intensityMultiplier, 1.5));
+            map.current.setPaintProperty('sky', 'sky-atmosphere-color', atmosphereColor);
+            
+            // Gradually transition background from normal to black space
+            const bgRgb = backgroundColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [0, 179, 255];
+            const blackBgRgb = [0, 0, 0];
+            const interpolatedBg = [
+              Math.round(bgRgb[0] * (1 - transitionProgress) + blackBgRgb[0] * transitionProgress),
+              Math.round(bgRgb[1] * (1 - transitionProgress) + blackBgRgb[1] * transitionProgress),
+              Math.round(bgRgb[2] * (1 - transitionProgress) + blackBgRgb[2] * transitionProgress)
+            ];
+            const interpolatedBgColor = `#${interpolatedBg.map(x => x.toString(16).padStart(2, '0')).join('')}`;
+            map.current.setPaintProperty('background', 'background-color', interpolatedBgColor);
+            
+            // Gradually increase star intensity (0 at zoom 9, up to 0.8 at very low zoom)
+            const starIntensity = transitionProgress * 0.8;
+            
+            // Gradually transition horizon blend for atmospheric rim
+            const horizonBlend = 0.1 + (transitionProgress * 0.2); // 0.1 at zoom 9, 0.3 at zoom 0
+            
+            // Set fog for gradual space transition - black space with stars
+            (map.current.setFog as any)({
+              'color': interpolatedBgColor, // Gradually blacker
+              'high-color': currentZoom < 3 ? 
+                `rgba(${atmosphereRgb[0]}, ${atmosphereRgb[1]}, ${atmosphereRgb[2]}, ${0.4 * transitionProgress})` : // Atmospheric glow at horizon when very zoomed out
+                interpolatedBgColor, // Match background
+              'horizon-blend': horizonBlend,
+              'space-color': '#000000', // Black space
+              'star-intensity': starIntensity // Gradually increase stars
+            });
+          } else {
+            if (!map.current) return;
+            // Normal view (zoom >= 9) - use standard sky settings
+            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity, 1.5));
+            // Remove stars and reset fog when zoomed in
+            try {
+              (map.current.setFog as any)(null);
+            } catch (e) {
+              // Ignore if fog doesn't exist
+            }
+          }
+        } catch (e) {
+          // Ignore errors during updates
+        }
+      }
+    };
+
+    map.current.on('move', updateMapState);
+    map.current.on('zoom', updateMapState);
+    map.current.on('rotate', updateMapState);
+    map.current.on('pitch', updateMapState);
+
+    return () => {
+      if (map.current && !(map.current as any)._removed) {
+        map.current.off('move', updateMapState);
+        map.current.off('zoom', updateMapState);
+        map.current.off('rotate', updateMapState);
+        map.current.off('pitch', updateMapState);
+      }
+    };
+  }, [sunIntensity, atmosphereColor]);
+
+  // Marker Tools Implementation
+  useEffect(() => {
+    if (!map.current || !showMarkerTools) return;
+
+    const handleMapClick = (e: mapboxgl.MapMouseEvent) => {
+      const coords: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      const popup = prompt('Enter popup text (optional):') || undefined;
+      const markerId = `marker-${Date.now()}`;
+      const newMarker = {
+        id: markerId,
+        position: coords,
+        popup
+      };
+      
+      // Add visual marker
+      const markerElement = document.createElement('div');
+      markerElement.style.width = '30px';
+      markerElement.style.height = '30px';
+      markerElement.style.borderRadius = '50%';
+      markerElement.style.backgroundColor = '#ff0000';
+      markerElement.style.border = '3px solid white';
+      markerElement.style.cursor = 'pointer';
+
+      const marker = new mapboxgl.Marker(markerElement)
+        .setLngLat(coords)
+        .addTo(map.current!);
+
+      if (popup) {
+        marker.setPopup(new mapboxgl.Popup().setText(popup));
+      }
+
+      // Store marker reference
+      mapboxMarkersRef.current[markerId] = marker;
+      setMarkers(prev => [...prev, newMarker]);
+    };
+
+    map.current.on('click', handleMapClick);
     return () => {
       if (map.current && !(map.current as any)._removed) {
         map.current.off('click', handleMapClick);
       }
     };
-  }, [isRecordingPath, handleMapClick]);
+  }, [showMarkerTools]);
 
-  // Register building designer click handler
+  // Remove markers when deleted from state
   useEffect(() => {
     if (!map.current) return;
+    
+    const currentMarkerIds = new Set(markers.map(m => m.id));
+    
+    // Remove markers that are no longer in state
+    Object.keys(mapboxMarkersRef.current).forEach(id => {
+      if (!currentMarkerIds.has(id)) {
+        mapboxMarkersRef.current[id].remove();
+        delete mapboxMarkersRef.current[id];
+      }
+    });
+  }, [markers]);
 
-    if (isBuildingDesignerMode) {
-      map.current.on('click', handleMapClickForBuilding);
-    } else {
-      map.current.off('click', handleMapClickForBuilding);
+  // Implement Language/Localization
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    try {
+      // Language in Mapbox is handled through style specification
+      // We need to modify the style's language property
+      const style = map.current.getStyle();
+      if (style && style.glyphs) {
+        // Update glyph URL to include language
+        // This is a simplified approach - full implementation would require style modification
+        console.log('Language set to:', mapLanguage);
+        // Note: Full language support requires custom style modifications
+      }
+    } catch (e) {
+      console.warn('Language setting error:', e);
     }
+  }, [mapLanguage]);
 
-    return () => {
-      if (map.current && !(map.current as any)._removed) {
-        map.current.off('click', handleMapClickForBuilding);
+  // Implement Attribution visibility
+  useEffect(() => {
+    if (!map.current) return;
+    
+    const updateAttribution = () => {
+      try {
+        // Find attribution control - it might not exist immediately
+        const attributionControl = document.querySelector('.mapboxgl-ctrl-attrib');
+        if (attributionControl) {
+          (attributionControl as HTMLElement).style.display = showAttribution ? 'block' : 'none';
+        } else {
+          // Try again after a short delay if not found
+          setTimeout(updateAttribution, 100);
+        }
+      } catch (e) {
+        console.warn('Attribution control error:', e);
       }
     };
-  }, [isBuildingDesignerMode, handleMapClickForBuilding]);
 
-  // Update preview line when selectedPoints changes
-  useEffect(() => {
-    if (isBuildingDesignerMode && selectedPoints.length > 0) {
-      updatePreviewLine();
+    updateAttribution();
+    
+    // Also check after style loads
+    if (map.current.isStyleLoaded()) {
+      setTimeout(updateAttribution, 500);
+    } else {
+      map.current.once('style.load', () => {
+        setTimeout(updateAttribution, 500);
+      });
     }
-  }, [selectedPoints, isBuildingDesignerMode, updatePreviewLine]);
+  }, [showAttribution]);
 
-  // Re-render buildings when customBuildings changes
-  useEffect(() => {
-    if (customBuildings.length > 0) {
-      renderCustomBuildings();
-    }
-  }, [customBuildings, renderCustomBuildings]);
 
   useEffect(() => {
     if (!mapContainer.current || map.current) return; // Initialize only once
@@ -3052,7 +3306,7 @@ const Map: React.FC<MapProps> = ({
 
     const drawInstance = new (MapboxDraw as any)({
       displayControlsDefault: false,
-      controls: { polygon: false, trash: false },
+      controls: { polygon: false, trash: false, rectangle: true },
       modes: {
         ...defaultModes,
         draw_polygon: FreehandMode
@@ -3066,31 +3320,44 @@ const Map: React.FC<MapProps> = ({
 
     // Wait for the style to load before adding custom layers
     mapInstance.on('style.load', () => {
+        // Automatically refresh 3D features when style loads (default behavior)
+        setTimeout(() => {
+          if (map.current && map.current.isStyleLoaded()) {
+            console.log('🔄 Auto-refreshing 3D features on style load');
+            initializeLayers();
+          }
+        }, 300);
+        
         // Add sky layer immediately to prevent white screen
         try {
+          // Check if we should force space view based on zoom (starts at zoom 9)
+          const currentZoom = mapInstance.getZoom();
+          const shouldForceSpaceView = currentZoom < 9;
+          
           // Add sky based on skyLayerType first, then skyType
-          if (skyLayerType === 'atmosphere') {
-            // Use atmosphere sky type
+          if (shouldForceSpaceView || skyLayerType === 'atmosphere') {
+            // Use atmosphere sky type - enhanced for visible Earth atmosphere
             mapInstance.addLayer({
               'id': 'sky',
               'type': 'sky',
               'paint': {
                 'sky-type': 'atmosphere',
                 'sky-atmosphere-sun': [sunAzimuth, sunElevation],
-                'sky-atmosphere-sun-intensity': sunIntensity,
+                'sky-atmosphere-sun-intensity': Math.max(sunIntensity, 1.5), // Increased intensity for visibility
                 'sky-atmosphere-halo-color': haloColor,
                 'sky-atmosphere-color': atmosphereColor,
                 'sky-opacity': 1.0
               } as any
             });
             
-            // Add background
+            // Add background - force black for space view
+            const bgColor = shouldForceSpaceView ? '#000000' : backgroundColor;
             mapInstance.addLayer({
               'id': 'background',
               'type': 'background',
-              'paint': { 'background-color': backgroundColor }
+              'paint': { 'background-color': bgColor }
             }, 'sky');
-          } else if (skyType === 'blue') {
+          } else if (!shouldForceSpaceView && skyType === 'blue') {
             // Blue sky
             mapInstance.addLayer({
               'id': 'sky',
@@ -3117,7 +3384,7 @@ const Map: React.FC<MapProps> = ({
               'type': 'background',
               'paint': { 'background-color': '#A9D4FF' }
             }, 'sky');
-          } else if (skyType === 'evening') {
+          } else if (!shouldForceSpaceView && skyType === 'evening') {
             // Enhanced dusk sky - more blue, less orange
             mapInstance.addLayer({
               'id': 'sky',
@@ -3149,7 +3416,7 @@ const Map: React.FC<MapProps> = ({
               'type': 'background',
               'paint': { 'background-color': '#C4B5FD' }
             }, 'sky');
-          } else if (skyType === 'night') {
+          } else if (!shouldForceSpaceView && skyType === 'night') {
             // Night sky
             mapInstance.addLayer({
               'id': 'sky',
@@ -3182,7 +3449,7 @@ const Map: React.FC<MapProps> = ({
             setTimeout(() => {
               addStars();
             }, 500);
-          } else if (skyType === 'sunrise') {
+          } else if (!shouldForceSpaceView && skyType === 'sunrise') {
             // Sunrise sky (less blue, warmer tones)
             mapInstance.addLayer({
               'id': 'sky',
@@ -3217,20 +3484,21 @@ const Map: React.FC<MapProps> = ({
           console.log('Could not add sky layer immediately:', e);
         }
         
-        // Set maximum render distance and view settings
+        // Set fog for space view - will be updated dynamically based on zoom
         try {
-          // Extend far clip plane for maximum view distance
           if (mapInstance.getStyle().layers) {
-            mapInstance.setFog({
-              'color': 'rgba(0, 0, 0, 0)', // Transparent fog
-              'high-color': 'rgba(0, 0, 0, 0)', // No high-altitude fog
-              'horizon-blend': 0.1, // Minimal horizon blending
-              'space-color': 'rgba(0, 0, 0, 0)', // No space fog
-              'star-intensity': 0 // Stars handled separately
+            // Default to space view (black with stars)
+            const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [95, 179, 255];
+            (mapInstance.setFog as any)({
+              'color': '#000000', // Black space
+              'high-color': '#000000', // Black space
+              'horizon-blend': 0.2,
+              'space-color': '#000000', // Black space
+              'star-intensity': 0.5 // Visible stars
             });
           }
         } catch (e) {
-          console.log('Could not set advanced fog settings:', e);
+          console.log('Could not set fog for space view:', e);
         }
         
       // Add camera path layer
@@ -3347,14 +3615,24 @@ const Map: React.FC<MapProps> = ({
       mapInstance.setPitch(60);
       mapInstance.setBearing(-30);
 
-      // Initialize layers immediately and after a delay to ensure they load
+      // Initialize layers immediately and after a delay to ensure they load (auto-refresh 3D features)
+      console.log('🔄 Auto-refreshing 3D features on map load');
       initializeLayers();
       setTimeout(() => {
+        console.log('🔄 Auto-refreshing 3D features (delayed)');
         initializeLayers();
         
-        // Auto-start continuous cycle after everything is loaded
-        startContinuousCycle();
+        // Don't auto-start continuous cycle - sun cycle is OFF by default
+        // User can manually start it if desired
       }, 1000);
+      
+      // Additional refresh after a longer delay to ensure everything loads
+      setTimeout(() => {
+        if (map.current && map.current.isStyleLoaded()) {
+          console.log('🔄 Auto-refreshing 3D features (final refresh)');
+          initializeLayers();
+        }
+      }, 2000);
     });
 
 
@@ -3540,141 +3818,22 @@ const Map: React.FC<MapProps> = ({
     };
   }, [map.current]);
 
-  // Effect to handle 3D models
-  useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded()) return;
-
-    if (map.current.getLayer('custom-clouds-3d')) {
-      map.current.removeLayer('custom-clouds-3d');
-    }
-
-
-    if (models3D.length > 0) {
-      // Create a custom layer for 3D models
-      const customLayer: mapboxgl.CustomLayerInterface = {
-        id: '3d-models',
-        type: 'custom',
-        onAdd: function(map: mapboxgl.Map, gl: WebGLRenderingContext) {
-          (this as any).camera = new THREE.Camera();
-          (this as any).camera.far = 10000000;
-          (this as any).scene = new THREE.Scene();
-          (this as any).renderer = new THREE.WebGLRenderer({
-            canvas: map.getCanvas(),
-            context: gl,
-            antialias: true
-          });
-          (this as any).renderer.autoClear = false;
-          (this as any).loader = new GLTFLoader();
-          (this as any).models = {};
-          (this as any).map = map;
-
-          // Add ambient light
-          const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-          (this as any).scene.add(ambientLight);
-
-          // Add directional light
-          const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-          directionalLight.position.set(0, 1, 0);
-          (this as any).scene.add(directionalLight);
-
-          // Load all models
-          models3D.forEach(model => {
-            (this as any).loader.load(model.url, (gltf: { scene: THREE.Object3D }) => {
-              const object = gltf.scene;
-              
-              // Center the model
-              const box = new THREE.Box3().setFromObject(object);
-              const center = box.getCenter(new THREE.Vector3());
-              object.position.sub(center);
-
-              // Scale the model
-              const size = box.getSize(new THREE.Vector3());
-              const maxDim = Math.max(size.x, size.y, size.z);
-              const scale = model.scale / maxDim;
-              object.scale.set(scale, scale, scale);
-
-              // Rotate the model
-              object.rotation.y = model.rotation * (Math.PI / 180);
-
-              // Store the model
-              (this as any).models[model.id] = object;
-              (this as any).scene.add(object);
-
-              // Force a repaint
-              map.triggerRepaint();
-            }, 
-            // Progress callback
-            (xhr: any) => {
-              console.log((xhr.loaded / xhr.total * 100) + '% loaded');
-            },
-            // Error callback
-            (error: any) => {
-              console.error('Error loading model:', error);
-            });
-          });
-        },
-        render: function(gl: WebGLRenderingContext, matrix: number[]) {
-          const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), Math.PI / 2);
-          const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), Math.PI);
-          const m = new THREE.Matrix4().fromArray(matrix).multiply(rotationX).multiply(rotationZ);
-          (this as any).camera.projectionMatrix = m;
-
-          // Update model positions
-          models3D.forEach(model => {
-            const object = (this as any).models[model.id];
-            if (object && (this as any).map) {
-              const position = (this as any).map.project([model.position[0], model.position[1]]);
-              object.position.set(position.x, position.y, 0);
-            }
-          });
-
-          (this as any).renderer.resetState();
-          (this as any).renderer.render((this as any).scene, (this as any).camera);
-          (this as any).map.triggerRepaint();
-        }
-      };
-
-      // Add the custom layer
-      if (map.current) {
-        if (map.current.getLayer('3d-models')) {
-            map.current.removeLayer('3d-models');
-        }
-        map.current.addLayer(customLayer);
-      }
-    }
-
-
-    return () => {
-      const mapInstance = map.current;
-      if (!mapInstance || (mapInstance as any)._removed || !mapInstance.isStyleLoaded()) {
-        return;
-      }
-      try {
-        if (mapInstance.getLayer('custom-clouds-3d')) {
-          mapInstance.removeLayer('custom-clouds-3d');
-        }
-      } catch(e) { /* ignore */ }
-      try {
-        if (mapInstance.getLayer('3d-models')) {
-          mapInstance.removeLayer('3d-models');
-        }
-      } catch(e) { /* ignore */ }
-    };
-  }, [models3D]);
 
 
   // Add refs for draggable components with proper types
   const filmControlsRef = useRef<HTMLDivElement>(null);
-  const recordingPathRef = useRef<HTMLDivElement>(null);
   const timelinePanelRef = useRef<HTMLDivElement>(null);
   const actorPanelRef = useRef<HTMLDivElement>(null);
   const effectsPanelRef = useRef<HTMLDivElement>(null);
   const settingsContainerRef = useRef<HTMLDivElement>(null);
+  const mapboxFeaturesPanelRef = useRef<HTMLDivElement>(null);
+  // Store control references to avoid duplicates
+  const navControlRef = useRef<mapboxgl.NavigationControl | null>(null);
+  const geolocateControlRef = useRef<mapboxgl.GeolocateControl | null>(null);
+  const fullscreenControlRef = useRef<mapboxgl.FullscreenControl | null>(null);
+  const scaleControlRef = useRef<mapboxgl.ScaleControl | null>(null);
+  const mapboxMarkersRef = useRef<{ [key: string]: mapboxgl.Marker }>({});
   const cubeSliderRef = useRef<HTMLDivElement>(null);
-  const sidebarLinesRef = useRef<HTMLDivElement>(null);
-  const modelImportModalRef = useRef<HTMLDivElement>(null);
-  const modelListRef = useRef<HTMLDivElement>(null);
-  const placingModelRef = useRef<HTMLDivElement>(null);
 
   const initializeTerrain = useCallback(() => {
     if (!map.current || !map.current.isStyleLoaded()) return;
@@ -3857,44 +4016,100 @@ const Map: React.FC<MapProps> = ({
             </button>
             <div style={{ width: '1px', height: '24px', background: '#dadce0' }}></div>
             <button
-              onClick={() => setShowModelImport(!showModelImport)}
+              onClick={() => setShowMapboxFeatures(!showMapboxFeatures)}
               style={{
-                width: '40px',
+                width: 'auto',
                 height: '40px',
-                borderRadius: '50%',
-                background: showModelImport ? '#f1f3f4' : 'transparent',
+                borderRadius: '20px',
+                padding: '0 16px',
+                background: showMapboxFeatures ? '#f1f3f4' : 'transparent',
                 border: 'none',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: 'pointer',
                 transition: 'background 0.2s',
-                color: '#5f6368'
+                color: '#5f6368',
+                fontSize: '14px',
+                fontWeight: '500'
               }}
-              title="Import Models"
+              title="Mapbox Features"
             >
-              Import
+              Features
             </button>
             <div style={{ width: '1px', height: '24px', background: '#dadce0' }}></div>
             <button
-              onClick={() => setIsDrawing(!isDrawing)}
+              onClick={startGameAreaSelection}
               style={{
-                width: '40px',
+                width: 'auto',
                 height: '40px',
-                borderRadius: '50%',
-                background: isDrawing ? '#f1f3f4' : 'transparent',
+                borderRadius: '20px',
+                padding: '0 16px',
+                background: isSelectingGameArea ? '#4CAF50' : (gameAreaBounds ? '#2196f3' : 'transparent'),
                 border: 'none',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: 'pointer',
                 transition: 'background 0.2s',
-                color: '#5f6368'
+                color: (isSelectingGameArea || gameAreaBounds) ? 'white' : '#5f6368',
+                fontSize: '14px',
+                fontWeight: '500'
               }}
-              title="Drawing Tools"
+              title={isSelectingGameArea ? "Click points on map to create polygon. Double-click to finish." : (gameAreaBounds ? "Game area selected - Click to select new area" : "Select Game Area (Polygon)")}
             >
-              Draw
+              {isSelectingGameArea ? `Points: ${gameAreaPolygon.length}` : (gameAreaBounds ? 'Game Area' : 'Select Area')}
             </button>
+            {isSelectingGameArea && gameAreaPolygon.length >= 3 && (
+              <button
+                onClick={finishGameAreaSelection}
+                style={{
+                  width: 'auto',
+                  height: '40px',
+                  borderRadius: '20px',
+                  padding: '0 12px',
+                  background: '#4CAF50',
+                  border: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  marginLeft: '8px'
+                }}
+                title="Finish Polygon"
+              >
+                Finish
+              </button>
+            )}
+            {gameAreaBounds && !isSelectingGameArea && (
+              <button
+                onClick={clearGameArea}
+                style={{
+                  width: 'auto',
+                  height: '40px',
+                  borderRadius: '20px',
+                  padding: '0 12px',
+                  background: '#f44336',
+                  border: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  marginLeft: '8px'
+                }}
+                title="Clear Game Area"
+              >
+                Clear
+              </button>
+            )}
             <div style={{ width: '1px', height: '24px', background: '#dadce0' }}></div>
             <button
               onClick={() => setShowSidePanel(!showSidePanel)}
@@ -3979,19 +4194,6 @@ const Map: React.FC<MapProps> = ({
       </div>
       )}
 
-      {isRecordingPath && (
-        <Draggable nodeRef={recordingPathRef as React.RefObject<HTMLElement>}>
-          <div ref={recordingPathRef} style={{
-            background: 'rgba(0, 0, 0, 0.8)',
-            color: 'white',
-            padding: '16px',
-            borderRadius: '8px',
-            zIndex: 1000
-          }}>
-            Click to place {recordingPoints.length === 0 ? 'first' : 'second'} point
-          </div>
-        </Draggable>
-      )}
 
       {/* Timeline Panel */}
       {showTimeline && (
@@ -4239,89 +4441,6 @@ const Map: React.FC<MapProps> = ({
 
 
 
-      {/* Line List */}
-      {!isSlideshowMode && (
-        <Draggable nodeRef={sidebarLinesRef as React.RefObject<HTMLElement>}>
-        <div ref={sidebarLinesRef} className="sidebar-lines-list" style={{
-          position: 'absolute',
-          top: '80px',
-          right: '20px',
-          zIndex: 1000,
-          background: 'white',
-          padding: '16px',
-          borderRadius: '8px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-          minWidth: '220px',
-          maxWidth: '260px',
-        }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>Your Lines</div>
-          {recordingLines.length === 0 && (
-            <div style={{ color: '#888', fontSize: '14px' }}>No lines yet</div>
-          )}
-          {recordingLines.map((line) => (
-            <div key={line.id} style={{ marginBottom: 12, padding: 6, borderRadius: 6, background: '#f7f7f7' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span>
-                  <span style={{
-                    display: 'inline-block',
-                    width: '12px',
-                    height: '12px',
-                    backgroundColor: '#ff0000',
-                    marginRight: '8px',
-                    borderRadius: '2px'
-                  }}></span>
-                  {line.name}
-                </span>
-                <button
-                  style={{
-                    marginLeft: 10,
-                    background: '#e53935',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: 4,
-                    padding: '2px 8px',
-                    cursor: 'pointer'
-                  }}
-                  onClick={() => {
-                    // Remove the line's individual source and layer from the map
-                    if (map.current) {
-                      try {
-                        if (
-                          map.current &&
-                          map.current.style &&
-                          typeof map.current.getLayer === 'function' &&
-                          typeof map.current.getSource === 'function' &&
-                          !(map.current as any)._removed
-                        ) {
-                          const mapInstance = map.current!;
-                          if (mapInstance.getLayer(`recording-path-${line.id}`)) {
-                            try { mapInstance.removeLayer(`recording-path-${line.id}`); } catch (e) { console.error(e); }
-                          }
-                          if (mapInstance.getSource(`recording-path-${line.id}`)) {
-                            try { mapInstance.removeSource(`recording-path-${line.id}`); } catch (e) { console.error(e); }
-                          }
-                          if (mapInstance.getLayer(`recording-path-endpoint-start-${line.id}`)) {
-                            try { mapInstance.removeLayer(`recording-path-endpoint-start-${line.id}`); } catch (e) { console.error(e); }
-                          }
-                          if (mapInstance.getSource(`recording-path-endpoint-start-${line.id}`)) {
-                            try { mapInstance.removeSource(`recording-path-endpoint-start-${line.id}`); } catch (e) { console.error(e); }
-                          }
-                          if (mapInstance.getLayer(`recording-path-endpoint-end-${line.id}`)) {
-                            try { mapInstance.removeLayer(`recording-path-endpoint-end-${line.id}`); } catch (e) { console.error(e); }
-                          }
-                        }
-                      } catch (e) { console.error(e); }
-                          }
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Draggable>
-      )}
 
 
       {/* Settings Panel */}
@@ -4380,6 +4499,25 @@ const Map: React.FC<MapProps> = ({
             padding: '20px'
           }}>
 
+          {/* Terrain Exaggeration */}
+          <div style={{ marginBottom: '20px' }}>
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Terrain Exaggeration</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="range"
+                min="0.1"
+                max="3"
+                step="0.1"
+                value={terrainExaggeration}
+                onChange={(e) => setTerrainExaggeration(Number(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#666', fontSize: '14px', minWidth: '40px' }}>
+                {terrainExaggeration}x
+              </span>
+            </div>
+          </div>
+
           {/* Building Color Control */}
           <div style={{ marginBottom: '20px' }}>
             <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Building Appearance</h4>
@@ -4406,325 +4544,6 @@ const Map: React.FC<MapProps> = ({
             </div>
           </div>
 
-          {/* 3D Building Designer */}
-          <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
-            <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              3D Building Designer
-              <button
-                onClick={() => setIsBuildingDesignerMode(!isBuildingDesignerMode)}
-                style={{
-                  padding: '4px 8px',
-                  fontSize: '12px',
-                  backgroundColor: isBuildingDesignerMode ? '#dc3545' : '#28a745',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                {isBuildingDesignerMode ? 'Exit Designer' : 'Enter Designer'}
-              </button>
-            </h4>
-
-            {isBuildingDesignerMode && (
-              <div>
-                <p style={{ fontSize: '12px', color: '#666', margin: '0 0 15px 0' }}>
-                  Click &quot;Start Selecting Points&quot; below, then click on the map to add points (minimum 3 points)
-                </p>
-
-                {/* Point Selection Controls */}
-                <div style={{ marginBottom: '15px' }}>
-                  <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
-                <button
-                      onClick={() => {
-                        setIsSelectingPoints(!isSelectingPoints);
-                        if (isSelectingPoints) {
-                          setSelectedPoints([]);
-                          clearPointMarkers();
-                        }
-                      }}
-              style={{
-                    padding: '6px 12px',
-                        fontSize: '12px',
-                        backgroundColor: isSelectingPoints ? '#dc3545' : '#007bff',
-                        color: 'white',
-                        border: 'none',
-                borderRadius: '4px',
-                    cursor: 'pointer',
-                        flex: 1
-                      }}
-                    >
-                      {isSelectingPoints ? 'Stop Selecting' : 'Start Selecting Points'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (selectedPoints.length >= 3) {
-                          addCustomBuilding(selectedPoints);
-                        }
-                      }}
-                      disabled={selectedPoints.length < 3}
-                      style={{
-                        padding: '6px 12px',
-                    fontSize: '12px',
-                        backgroundColor: selectedPoints.length >= 3 ? '#28a745' : '#6c757d',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: selectedPoints.length >= 3 ? 'pointer' : 'not-allowed',
-                        flex: 1
-                      }}
-                    >
-                      Create Building ({selectedPoints.length})
-                </button>
-                  </div>
-
-                  {selectedPoints.length > 0 && (
-                    <div style={{ marginBottom: '10px' }}>
-                      <h5 style={{ margin: '0 0 5px 0', fontSize: '12px', color: '#333' }}>Selected Points ({selectedPoints.length})</h5>
-                      <div style={{ maxHeight: '80px', overflowY: 'auto', fontSize: '11px', color: '#666' }}>
-                        {selectedPoints.map((point, index) => (
-                          <div key={index} style={{ marginBottom: '2px' }}>
-                            Point {index + 1}: {point[0].toFixed(6)}, {point[1].toFixed(6)}
-                          </div>
-                        ))}
-                      </div>
-                <button
-                        onClick={() => {
-                          setSelectedPoints([]);
-                          clearPointMarkers();
-                        }}
-                  style={{
-                          padding: '3px 6px',
-                          fontSize: '10px',
-                          backgroundColor: '#dc3545',
-                          color: 'white',
-                    border: 'none',
-                          borderRadius: '3px',
-                          cursor: 'pointer',
-                          marginTop: '5px'
-                        }}
-                      >
-                        Clear Points
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Building Properties */}
-                <div style={{ marginBottom: '15px' }}>
-                  <h5 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#333' }}>Building Properties</h5>
-                  
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
-                    <div>
-                      <label style={{ fontSize: '12px', color: '#333', display: 'block', marginBottom: '4px' }}>Height (m)</label>
-                      <input
-                        type="number"
-                        value={buildingDesignerProperties.height}
-                        onChange={(e) => setBuildingDesignerProperties(prev => ({ ...prev, height: Number(e.target.value) }))}
-                        style={{ width: '100%', padding: '4px', fontSize: '12px', border: '1px solid #ccc', borderRadius: '4px' }}
-                        min="1"
-                        max="500"
-                      />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '12px', color: '#333', display: 'block', marginBottom: '4px' }}>Color</label>
-                      <input
-                        type="color"
-                        value={buildingDesignerProperties.color}
-                        onChange={(e) => setBuildingDesignerProperties(prev => ({ ...prev, color: e.target.value }))}
-                        style={{ width: '100%', height: '30px', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '12px', color: '#333', display: 'block', marginBottom: '4px' }}>Style</label>
-                      <select
-                        value={buildingDesignerProperties.style}
-                        onChange={(e) => setBuildingDesignerProperties(prev => ({ ...prev, style: e.target.value as any }))}
-                        style={{ width: '100%', padding: '4px', fontSize: '12px', border: '1px solid #ccc', borderRadius: '4px' }}
-                      >
-                        <option value="box">Box</option>
-                        <option value="pyramid">Pyramid</option>
-                        <option value="cylinder">Cylinder</option>
-                        <option value="tower">Tower</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '12px', color: '#333', display: 'block', marginBottom: '4px' }}>Rotation (°)</label>
-                      <input
-                        type="number"
-                        value={buildingDesignerProperties.rotation}
-                        onChange={(e) => setBuildingDesignerProperties(prev => ({ ...prev, rotation: Number(e.target.value) }))}
-                        style={{ width: '100%', padding: '4px', fontSize: '12px', border: '1px solid #ccc', borderRadius: '4px' }}
-                        min="0"
-                        max="360"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Custom Buildings List */}
-                {customBuildings.length > 0 && (
-                  <div>
-                    <h5 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#333' }}>Custom Buildings ({customBuildings.length})</h5>
-                    <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                      {customBuildings.map((building) => (
-                        <div
-                          key={building.id}
-                          style={{
-                            padding: '8px',
-                            marginBottom: '5px',
-                            backgroundColor: selectedBuilding === building.id ? '#e3f2fd' : '#fff',
-                            border: selectedBuilding === building.id ? '2px solid #1976d2' : '1px solid #ddd',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                            fontSize: '12px'
-                          }}
-                          onClick={() => setSelectedBuilding(building.id)}
-                        >
-                          <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{building.name}</div>
-                          <div style={{ color: '#666', marginBottom: '4px' }}>
-                            {building.style} • {building.height}m • {building.points?.length || 4} points
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ color: '#666', fontSize: '11px' }}>
-                              {building.position[0].toFixed(4)}, {building.position[1].toFixed(4)}
-                            </span>
-                            <div style={{ display: 'flex', gap: '4px' }}>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  startEditingBuilding(building);
-                                }}
-                                style={{
-                                  padding: '3px 6px',
-                                  fontSize: '10px',
-                                  backgroundColor: '#007bff',
-                                  color: 'white',
-                                  border: 'none',
-                                  borderRadius: '3px',
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                Edit
-                </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteCustomBuilding(building.id);
-                                }}
-                                style={{
-                                  padding: '3px 6px',
-                                  fontSize: '10px',
-                                  backgroundColor: '#dc3545',
-                                  color: 'white',
-                                  border: 'none',
-                                  borderRadius: '3px',
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Building Edit Interface */}
-                {isEditingBuilding && editingBuilding && (
-                  <div style={{ marginTop: '15px', padding: '10px', backgroundColor: '#fff3cd', borderRadius: '6px', border: '1px solid #ffeaa7' }}>
-                    <h5 style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#856404', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      Editing: {editingBuilding.name}
-                    </h5>
-                    
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
-                      <div>
-                        <label style={{ fontSize: '11px', color: '#333', display: 'block', marginBottom: '3px' }}>Height (m)</label>
-                        <input
-                          type="number"
-                          value={editingBuildingProperties.height}
-                          onChange={(e) => setEditingBuildingProperties(prev => ({ ...prev, height: Number(e.target.value) }))}
-                          style={{ width: '100%', padding: '4px', fontSize: '11px', border: '1px solid #ccc', borderRadius: '3px' }}
-                          min="1"
-                          max="500"
-                        />
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '11px', color: '#333', display: 'block', marginBottom: '3px' }}>Color</label>
-                        <input
-                          type="color"
-                          value={editingBuildingProperties.color}
-                          onChange={(e) => setEditingBuildingProperties(prev => ({ ...prev, color: e.target.value }))}
-                          style={{ width: '100%', height: '28px', border: '1px solid #ccc', borderRadius: '3px', cursor: 'pointer' }}
-                        />
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '11px', color: '#333', display: 'block', marginBottom: '3px' }}>Style</label>
-                        <select
-                          value={editingBuildingProperties.style}
-                          onChange={(e) => setEditingBuildingProperties(prev => ({ ...prev, style: e.target.value as any }))}
-                          style={{ width: '100%', padding: '4px', fontSize: '11px', border: '1px solid #ccc', borderRadius: '3px' }}
-                        >
-                          <option value="box">Box</option>
-                          <option value="pyramid">Pyramid</option>
-                          <option value="cylinder">Cylinder</option>
-                          <option value="tower">Tower</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '11px', color: '#333', display: 'block', marginBottom: '3px' }}>Rotation (°)</label>
-                        <input
-                          type="number"
-                          value={editingBuildingProperties.rotation}
-                          onChange={(e) => setEditingBuildingProperties(prev => ({ ...prev, rotation: Number(e.target.value) }))}
-                          style={{ width: '100%', padding: '4px', fontSize: '11px', border: '1px solid #ccc', borderRadius: '3px' }}
-                          min="0"
-                          max="360"
-                        />
-              </div>
-          </div>
-
-                    <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                        onClick={saveBuildingChanges}
-                style={{
-                          padding: '6px 12px',
-                          fontSize: '11px',
-                          backgroundColor: '#28a745',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  flex: 1
-                }}
-              >
-                        Save Changes
-                      </button>
-                      <button
-                        onClick={cancelEditingBuilding}
-                        style={{
-                          padding: '6px 12px',
-                          fontSize: '11px',
-                          backgroundColor: '#6c757d',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          flex: 1
-                        }}
-                      >
-                        Cancel
-              </button>
-            </div>
-                </div>
-                )}
-                </div>
-            )}
-          </div>
-
-
           {/* 3D Layer Controls */}
           <div style={{ marginBottom: '20px' }}>
             <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>3D Features</h4>
@@ -4744,21 +4563,7 @@ const Map: React.FC<MapProps> = ({
             ))}
           </div>
 
-          {/* Label Toggle */}
-          <div style={{ marginBottom: '20px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
-              <input
-                type="checkbox"
-                id="show-labels"
-                checked={showLabels}
-                onChange={toggleLabels}
-                style={{ marginRight: '8px' }}
-              />
-              <label htmlFor="show-labels" style={{ fontSize: '14px', cursor: 'pointer' }}>
-                Show Map Labels
-              </label>
-            </div>
-          </div>
+          
 
 
           {/* Refresh Button */}
@@ -4831,12 +4636,13 @@ const Map: React.FC<MapProps> = ({
               <button
                 onClick={() => {
                   setSkyGradientRadius(90);
-                  setSunAzimuth(0);
+                  setSunAzimuth(200);
                   setSunElevation(90);
                   setSunIntensity(1);
                   setSunColor('#ffffff');
                   setHaloColor('#ffffff');
-                  setAtmosphereColor('#ffffff');
+                  setHaloOpacity(1.0);
+                  setAtmosphereColor('#00bfff');
                   setBackgroundColor('#DBEAFE');
                   setBackgroundOpacity(1);
                   setIsSunCycleEnabled(false);
@@ -4940,18 +4746,25 @@ const Map: React.FC<MapProps> = ({
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <label style={{ fontSize: '12px', color: '#666', minWidth: '60px' }}>
-                  Duration: {sunCycleDuration}s
+                  Duration:
                 </label>
                 <input
-                  type="range"
+                  type="number"
                   min="5"
                   max="120"
                   step="5"
                   value={sunCycleDuration}
                   onChange={(e) => setSunCycleDuration(Number(e.target.value))}
-                  style={{ flex: 1 }}
+                  style={{ 
+                    width: '80px', 
+                    padding: '4px 8px', 
+                    border: '1px solid #ccc', 
+                    borderRadius: '4px',
+                    fontSize: '12px'
+                  }}
                   disabled={isSunCycleEnabled}
                 />
+                <span style={{ fontSize: '12px', color: '#666' }}>seconds</span>
               </div>
             </div>
 
@@ -5041,169 +4854,430 @@ const Map: React.FC<MapProps> = ({
               </div>
             </div>
           </div>
+          </div>
+        </div>
+      )}
 
-          {/* Camera Angle Controls */}
-          <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#fff3cd', borderRadius: '8px', border: '1px solid #ffeaa7' }}>
-            <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              📷 Camera Angle Controls
+      {/* Mapbox Features Panel */}
+      {showMapboxFeatures && !isSlideshowMode && (
+        <div ref={mapboxFeaturesPanelRef} style={{
+          position: 'fixed',
+          top: '80px',
+          right: '20px',
+          width: '380px',
+          maxHeight: 'calc(100vh - 120px)',
+          background: '#ffffff',
+          borderRadius: '12px',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+          zIndex: 1001,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          pointerEvents: 'auto'
+        }}>
+            {/* Header */}
+            <div style={{
+              height: '64px',
+              background: '#ffffff',
+              borderBottom: '1px solid #dadce0',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '0 20px',
+              flexShrink: 0
+            }}>
+              <h3 style={{ margin: 0, color: '#202124', fontSize: '18px', fontWeight: '500' }}>Mapbox Features</h3>
               <button
-                onClick={() => {
-                  setCameraPitch(0);
-                  setCameraBearing(0);
-                }}
+                onClick={() => setShowMapboxFeatures(false)}
                 style={{
-                  padding: '4px 8px',
-                  fontSize: '12px',
-                  backgroundColor: '#6c757d',
-                  color: 'white',
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '50%',
+                  background: 'transparent',
                   border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s',
+                  color: '#5f6368',
+                  fontSize: '20px'
                 }}
+                title="Close"
               >
-                Reset
+                ×
               </button>
-            </h4>
+            </div>
             
-            {/* Camera Pitch */}
-            <div style={{ marginBottom: '15px' }}>
+            {/* Scrollable Content */}
+            <div style={{
+              flex: 1,
+              overflowY: 'auto',
+              padding: '20px'
+            }}>
+              {/* Map Styles */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Map Styles</h4>
+                <select
+                  value={mapStyle}
+                  onChange={(e) => {
+                    const newStyle = e.target.value;
+                    setMapStyle(newStyle);
+                    if (map.current) {
+                      try {
+                        map.current.setStyle(newStyle);
+                        // Wait for style to load before doing anything else
+                        map.current.once('style.load', () => {
+                          console.log('Style loaded successfully');
+                        });
+                      } catch (error) {
+                        console.error('Error changing map style:', error);
+                      }
+                    }
+                  }}
+                  style={{ width: '100%', padding: '8px', fontSize: '14px', border: '1px solid #ccc', borderRadius: '4px' }}
+                >
+                  {availableStyles.map(style => (
+                    <option key={style.id} value={style.url}>{style.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Navigation Controls */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Navigation Controls</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Zoom Controls</label>
+                    <input type="checkbox" checked={showZoomControls} onChange={(e) => setShowZoomControls(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Compass</label>
+                    <input type="checkbox" checked={showCompass} onChange={(e) => setShowCompass(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Rotation Controls</label>
+                    <input type="checkbox" checked={showRotationControls} onChange={(e) => setShowRotationControls(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Pitch Controls</label>
+                    <input type="checkbox" checked={showPitchControls} onChange={(e) => setShowPitchControls(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Geolocation</label>
+                    <input type="checkbox" checked={showGeolocation} onChange={(e) => setShowGeolocation(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Fullscreen</label>
+                    <input type="checkbox" checked={showFullscreen} onChange={(e) => setShowFullscreen(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Scale</label>
+                    <input type="checkbox" checked={showScale} onChange={(e) => setShowScale(e.target.checked)} />
+                  </div>
+                  <div style={{ marginTop: '10px' }}>
               <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
-                Camera Pitch: {cameraPitch}°
-                <span style={{ fontSize: '12px', color: '#666', marginLeft: '8px' }}>
-                  {cameraPitch === 0 ? '(Top-down view)' : 
-                   cameraPitch < 30 ? '(Slight angle)' :
-                   cameraPitch < 60 ? '(Low-angle shot)' :
-                   cameraPitch < 85 ? '(Dramatic low-angle)' :
-                   '(Horizontal view - MAXIMUM DRAMA!)'}
-                </span>
+                      Zoom Level: {zoomLevel}
               </label>
               <input
                 type="range"
                 min="0"
-                max="90"
+                      max="24"
+                      step="0.1"
+                      value={zoomLevel}
+                      onChange={(e) => {
+                        const zoom = Number(e.target.value);
+                        setZoomLevel(zoom);
+                        if (map.current) map.current.zoomTo(zoom);
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <div style={{ marginTop: '10px' }}>
+                    <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                      Map Rotation: {mapRotation}°
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
                 step="1"
-                value={cameraPitch}
-                onChange={(e) => setCameraPitch(Number(e.target.value))}
+                      value={mapRotation}
+                      onChange={(e) => {
+                        const rotation = Number(e.target.value);
+                        setMapRotation(rotation);
+                        if (map.current) map.current.setBearing(rotation);
+                      }}
                 style={{ width: '100%' }}
               />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666', marginTop: '5px' }}>
-                <span>0° (Top-down)</span>
-                <span>45° (Diagonal)</span>
-                <span>90° (Horizontal)</span>
+                  </div>
+                  <div style={{ marginTop: '10px' }}>
+                    <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                      Map Pitch: {mapPitch}°
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="85"
+                      step="1"
+                      value={mapPitch}
+                      onChange={(e) => {
+                        const pitch = Number(e.target.value);
+                        setMapPitch(pitch);
+                        if (map.current) map.current.setPitch(pitch);
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
               </div>
             </div>
 
-            {/* Camera Bearing */}
-            <div style={{ marginBottom: '15px' }}>
+              {/* Fog Controls (careful not to interfere with sky) */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#fff3cd', borderRadius: '8px', border: '1px solid #ffeaa7' }}>
+                <h4 style={{ margin: '0 0 10px 0', fontSize: '16px', color: '#856404' }}>⚠️ Fog Controls</h4>
+                <p style={{ fontSize: '12px', color: '#856404', margin: '0 0 15px 0' }}>
+                  Note: Fog may interact with sky settings. Adjust carefully.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Enable Fog</label>
+                    <input type="checkbox" checked={fogEnabled} onChange={(e) => setFogEnabled(e.target.checked)} />
+                  </div>
+                  {fogEnabled && (
+                    <>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>Fog Color</label>
+                        <input
+                          type="color"
+                          value={fogColor}
+                          onChange={(e) => setFogColor(e.target.value)}
+                          style={{ width: '100%', height: '40px', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                        />
+                      </div>
+                      <div>
               <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
-                Camera Direction: {cameraBearing}°
-                <span style={{ fontSize: '12px', color: '#666', marginLeft: '8px' }}>
-                  {cameraBearing === 0 || cameraBearing === 360 ? '(North)' :
-                   cameraBearing === 90 ? '(East)' :
-                   cameraBearing === 180 ? '(South)' :
-                   cameraBearing === 270 ? '(West)' :
-                   cameraBearing < 90 ? '(Northeast)' :
-                   cameraBearing < 180 ? '(Southeast)' :
-                   cameraBearing < 270 ? '(Southwest)' : '(Northwest)'}
-                </span>
+                          Fog Range: [{fogRange[0].toFixed(1)}, {fogRange[1].toFixed(1)}]
               </label>
+                        <div style={{ display: 'flex', gap: '10px' }}>
               <input
                 type="range"
                 min="0"
-                max="360"
-                step="1"
-                value={cameraBearing}
-                onChange={(e) => setCameraBearing(Number(e.target.value))}
+                            max="5"
+                            step="0.1"
+                            value={fogRange[0]}
+                            onChange={(e) => setFogRange([Number(e.target.value), fogRange[1]])}
+                            style={{ flex: 1 }}
+                          />
+                          <input
+                            type="range"
+                            min="5"
+                            max="20"
+                            step="0.1"
+                            value={fogRange[1]}
+                            onChange={(e) => setFogRange([fogRange[0], Number(e.target.value)])}
+                            style={{ flex: 1 }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>Fog High Color</label>
+                        <input
+                          type="color"
+                          value={fogHighColor}
+                          onChange={(e) => setFogHighColor(e.target.value)}
+                          style={{ width: '100%', height: '40px', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>Fog Space Color</label>
+                        <input
+                          type="color"
+                          value={fogSpaceColor}
+                          onChange={(e) => setFogSpaceColor(e.target.value)}
+                          style={{ width: '100%', height: '40px', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                          Star Intensity: {fogStarIntensity.toFixed(2)}
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={fogStarIntensity}
+                          onChange={(e) => setFogStarIntensity(Number(e.target.value))}
                 style={{ width: '100%' }}
               />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666', marginTop: '5px' }}>
-                <span>0° (N)</span>
-                <span>90° (E)</span>
-                <span>180° (S)</span>
-                <span>270° (W)</span>
+                      </div>
+                    </>
+                  )}
               </div>
             </div>
 
-            {/* Quick Preset Buttons */}
+              {/* Terrain Controls */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Terrain Controls</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Enable Terrain</label>
+                    <input type="checkbox" checked={terrainEnabled} onChange={(e) => setTerrainEnabled(e.target.checked)} />
+                  </div>
             <div>
-              <h5 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#333' }}>Quick Presets</h5>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>Terrain Source</label>
+                    <select
+                      value={terrainSource}
+                      onChange={(e) => setTerrainSource(e.target.value)}
+                      style={{ width: '100%', padding: '8px', fontSize: '14px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    >
+                      <option value="mapbox-dem">Mapbox DEM</option>
+                      <option value="custom">Custom Source</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Layer Visibility Controls */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Layer Visibility</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Traffic Layer</label>
+                    <input type="checkbox" checked={trafficLayerVisible} onChange={(e) => setTrafficLayerVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Transit Layer</label>
+                    <input type="checkbox" checked={transitLayerVisible} onChange={(e) => setTransitLayerVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Water Layer</label>
+                    <input type="checkbox" checked={waterLayerVisible} onChange={(e) => setWaterLayerVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Land Use Layer</label>
+                    <input type="checkbox" checked={landuseLayerVisible} onChange={(e) => setLanduseLayerVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Place Labels</label>
+                    <input type="checkbox" checked={placeLabelsVisible} onChange={(e) => setPlaceLabelsVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>POI Labels</label>
+                    <input type="checkbox" checked={poiLabelsVisible} onChange={(e) => setPoiLabelsVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Road Labels</label>
+                    <input type="checkbox" checked={roadLabelsVisible} onChange={(e) => setRoadLabelsVisible(e.target.checked)} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Transport Labels</label>
+                    <input type="checkbox" checked={transportLabelsVisible} onChange={(e) => setTransportLabelsVisible(e.target.checked)} />
+                  </div>
+                </div>
+              </div>
+
+              {/* 3D Building Controls */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>3D Buildings</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Enable 3D Buildings</label>
+                    <input type="checkbox" checked={buildings3DEnabled} onChange={(e) => setBuildings3DEnabled(e.target.checked)} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                      Building Opacity: {buildingOpacity.toFixed(2)}
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={buildingOpacity}
+                      onChange={(e) => setBuildingOpacity(Number(e.target.value))}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Language/Localization */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Language</h4>
+                <select
+                  value={mapLanguage}
+                  onChange={(e) => setMapLanguage(e.target.value)}
+                  style={{ width: '100%', padding: '8px', fontSize: '14px', border: '1px solid #ccc', borderRadius: '4px' }}
+                >
+                  {availableLanguages.map(lang => (
+                    <option key={lang.code} value={lang.code}>{lang.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Attribution */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Attribution</h4>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ fontSize: '14px', color: '#333' }}>Show Attribution</label>
+                  <input type="checkbox" checked={showAttribution} onChange={(e) => setShowAttribution(e.target.checked)} />
+                </div>
+              </div>
+
+              {/* Marker Tools */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+                <h4 style={{ margin: '0 0 15px 0', fontSize: '16px', color: '#333' }}>Marker Tools</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 <button
-                  onClick={() => { setCameraPitch(0); setCameraBearing(0); }}
+                    onClick={() => setShowMarkerTools(!showMarkerTools)}
                   style={{
-                    padding: '4px 8px',
-                    fontSize: '11px',
-                    backgroundColor: '#28a745',
+                      padding: '8px 16px',
+                      fontSize: '14px',
+                      backgroundColor: showMarkerTools ? '#dc3545' : '#007bff',
                     color: 'white',
                     border: 'none',
                     borderRadius: '4px',
                     cursor: 'pointer'
                   }}
                 >
-                  📐 Top-down
+                    {showMarkerTools ? 'Stop Adding Markers' : 'Add Marker Mode'}
                 </button>
+                  {markers.length > 0 && (
+                    <div>
+                      <h5 style={{ margin: '10px 0 5px 0', fontSize: '14px', color: '#333' }}>Markers ({markers.length})</h5>
+                      <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                        {markers.map((marker) => (
+                          <div key={marker.id} style={{
+                            padding: '8px',
+                            marginBottom: '5px',
+                            backgroundColor: '#fff',
+                            border: '1px solid #ddd',
+                            borderRadius: '4px',
+                            fontSize: '12px'
+                          }}>
+                            <div>Position: {marker.position[0].toFixed(4)}, {marker.position[1].toFixed(4)}</div>
+                            {marker.popup && <div style={{ color: '#666', marginTop: '4px' }}>Popup: {marker.popup}</div>}
                 <button
-                  onClick={() => { setCameraPitch(45); setCameraBearing(0); }}
+                              onClick={() => setMarkers(markers.filter(m => m.id !== marker.id))}
                   style={{
+                                marginTop: '5px',
                     padding: '4px 8px',
                     fontSize: '11px',
-                    backgroundColor: '#17a2b8',
+                                backgroundColor: '#dc3545',
                     color: 'white',
                     border: 'none',
-                    borderRadius: '4px',
+                                borderRadius: '3px',
                     cursor: 'pointer'
                   }}
                 >
-                  📐 Diagonal
-                </button>
-                <button
-                  onClick={() => { setCameraPitch(45); setCameraBearing(0); }}
-                  style={{
-                    padding: '4px 8px',
-                    fontSize: '11px',
-                    backgroundColor: '#fd7e14',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  Low-angle
-                </button>
-                <button
-                  onClick={() => { setCameraPitch(35); setCameraBearing(45); }}
-                  style={{
-                    padding: '4px 8px',
-                    fontSize: '11px',
-                    backgroundColor: '#6f42c1',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  Perfect Sun View
+                              Remove
                 </button>
               </div>
+                        ))}
             </div>
           </div>
-
-          {/* Terrain Exaggeration */}
-          <div style={{ marginBottom: '20px' }}>
-            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>Terrain Exaggeration</h4>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <input
-                type="range"
-                min="0.1"
-                max="3"
-                step="0.1"
-                value={terrainExaggeration}
-                onChange={(e) => setTerrainExaggeration(Number(e.target.value))}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#666', fontSize: '14px', minWidth: '40px' }}>
-                {terrainExaggeration}x
-              </span>
+                  )}
             </div>
           </div>
           </div>
