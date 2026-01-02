@@ -1,19 +1,34 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import mapboxgl, { Point } from 'mapbox-gl';
-import type { Feature, Polygon, GeoJsonProperties } from 'geojson';
+import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
-import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
+import Draggable from 'react-draggable';
 import FreehandMode from 'mapbox-gl-draw-freehand-mode';
+
+// Type extensions for MapboxDraw
+interface MapboxDrawModes {
+  [key: string]: unknown;
+}
+
+interface MapboxDrawConstructor {
+  new (options?: {
+    displayControlsDefault?: boolean;
+    controls?: Record<string, boolean>;
+    modes?: MapboxDrawModes;
+  }): MapboxDraw;
+  modes?: MapboxDrawModes;
+}
+
+// Extended mapboxgl.Map type to include internal _removed property
+type MapboxMapWithInternal = mapboxgl.Map & {
+  _removed?: boolean;
+};
 
 interface MapProps {
   accessToken: string;
-  initialCoordinates?: [number, number];
   initialZoom?: number;
-  skyGradient?: 'blue' | 'sunset' | 'night';
-  onSkyGradientChange?: (gradient: 'blue' | 'sunset' | 'night') => void;
 }
 
 interface Layer3D {
@@ -51,20 +66,36 @@ interface Actor {
   animations: Animation[];
 }
 
+interface Keyframe {
+  time: number;
+  value?: number | [number, number, number] | Record<string, unknown>;
+  position?: [number, number, number];
+  easing?: string;
+}
+
 interface Animation {
   id: string;
   name: string;
   startTime: number;
   duration: number;
   type: 'move' | 'rotate' | 'scale' | 'custom';
-  keyframes: any[];
+  keyframes: Keyframe[];
+}
+
+interface EffectParameters {
+  intensity?: number;
+  color?: string;
+  position?: [number, number, number];
+  size?: number;
+  speed?: number;
+  [key: string]: unknown;
 }
 
 interface Effect {
   id: string;
   name: string;
   type: 'particle' | 'light' | 'weather' | 'custom';
-  parameters: any;
+  parameters: EffectParameters;
   startTime: number;
   duration: number;
 }
@@ -72,10 +103,7 @@ interface Effect {
 
 const Map: React.FC<MapProps> = ({
   accessToken,
-  initialCoordinates = [-122.4194, 37.7749], // San Francisco
-  initialZoom = 15,
-  skyGradient: externalSkyGradient,
-  onSkyGradientChange
+  initialZoom = 15
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -86,7 +114,6 @@ const Map: React.FC<MapProps> = ({
     { id: 'buildings', name: '3D Buildings', enabled: true }
   ]);
   const [draw, setDraw] = useState<MapboxDraw | null>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
   
   // Game area selection state
   const [isSelectingGameArea, setIsSelectingGameArea] = useState(false);
@@ -143,6 +170,24 @@ const Map: React.FC<MapProps> = ({
   const [sunCycleDuration, setSunCycleDuration] = useState(30); // Duration in seconds
   const sunCycleIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCycleRunningRef = useRef(false);
+  
+  // Refs to store latest sun cycle values to avoid recreating initializeLayers
+  const sunAzimuthRef = useRef(sunAzimuth);
+  const sunElevationRef = useRef(sunElevation);
+  const sunIntensityRef = useRef(sunIntensity);
+  const haloColorRef = useRef(haloColor);
+  const atmosphereColorRef = useRef(atmosphereColor);
+  const backgroundColorRef = useRef(backgroundColor);
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    sunAzimuthRef.current = sunAzimuth;
+    sunElevationRef.current = sunElevation;
+    sunIntensityRef.current = sunIntensity;
+    haloColorRef.current = haloColor;
+    atmosphereColorRef.current = atmosphereColor;
+    backgroundColorRef.current = backgroundColor;
+  }, [sunAzimuth, sunElevation, sunIntensity, haloColor, atmosphereColor, backgroundColor]);
 
 
 
@@ -190,6 +235,106 @@ const Map: React.FC<MapProps> = ({
   const [fogSpaceColor, setFogSpaceColor] = useState('#000000');
   const [fogStarIntensity, setFogStarIntensity] = useState(0.35);
 
+  // Cloud Controls
+  const [cloudsEnabled, setCloudsEnabled] = useState(false);
+  const [cloudDensity, setCloudDensity] = useState(5); // Number of clouds
+  const [cloudOpacity, setCloudOpacity] = useState(0.6);
+  const [cloudColor, setCloudColor] = useState('#ffffff');
+  const [cloudSize, setCloudSize] = useState(0.5); // Size multiplier (0.1 to 2.0)
+  const [cloudSpeed, setCloudSpeed] = useState(0.1); // Animation speed (0 to 1)
+  const cloudAnimationRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Cloud type selection
+  const [selectedCloudTypes, setSelectedCloudTypes] = useState<string[]>(['cumulus']);
+  
+  // Cloud type definitions
+  const cloudTypes = {
+    cirrus: {
+      name: 'Cirrus',
+      description: 'High, thin, wispy clouds',
+      baseAltitude: 6000,
+      altitudeRange: 2000,
+      height: 500,
+      heightRange: 300,
+      sizeMultiplier: 0.3,
+      opacity: 0.4,
+      color: '#ffffff',
+      densityMultiplier: 1.5
+    },
+    altocumulus: {
+      name: 'Altocumulus',
+      description: 'Mid-level, puffy, layered clouds',
+      baseAltitude: 3000,
+      altitudeRange: 1500,
+      height: 800,
+      heightRange: 500,
+      sizeMultiplier: 0.6,
+      opacity: 0.5,
+      color: '#ffffff',
+      densityMultiplier: 1.2
+    },
+    stratus: {
+      name: 'Stratus',
+      description: 'Low, flat, uniform clouds',
+      baseAltitude: 500,
+      altitudeRange: 500,
+      height: 300,
+      heightRange: 200,
+      sizeMultiplier: 1.2,
+      opacity: 0.7,
+      color: '#e0e0e0',
+      densityMultiplier: 0.8
+    },
+    cumulus: {
+      name: 'Cumulus',
+      description: 'Puffy, cotton-like clouds',
+      baseAltitude: 1500,
+      altitudeRange: 1000,
+      height: 1200,
+      heightRange: 800,
+      sizeMultiplier: 1.0,
+      opacity: 0.6,
+      color: '#ffffff',
+      densityMultiplier: 1.0
+    },
+    cumulonimbus: {
+      name: 'Cumulonimbus',
+      description: 'Large, towering storm clouds',
+      baseAltitude: 500,
+      altitudeRange: 500,
+      height: 4000,
+      heightRange: 2000,
+      sizeMultiplier: 2.0,
+      opacity: 0.8,
+      color: '#a0a0a0',
+      densityMultiplier: 0.5
+    },
+    nimbostratus: {
+      name: 'Nimbostratus',
+      description: 'Low, dark, rain clouds',
+      baseAltitude: 800,
+      altitudeRange: 400,
+      height: 2000,
+      heightRange: 1000,
+      sizeMultiplier: 1.5,
+      opacity: 0.75,
+      color: '#808080',
+      densityMultiplier: 0.7
+    }
+  };
+  
+  // Cloud area selection state
+  const [isSelectingCloudArea, setIsSelectingCloudArea] = useState(false);
+  const [cloudAreaBounds, setCloudAreaBounds] = useState<mapboxgl.LngLatBounds | null>(null);
+  const [cloudAreaPolygon, setCloudAreaPolygon] = useState<[number, number][]>([]);
+  const cloudAreaPointsRef = useRef<[number, number][]>([]);
+  const cloudAreaHandlersRef = useRef<{
+    handleClick?: (e: mapboxgl.MapMouseEvent) => void;
+    handleDoubleClick?: (e: mapboxgl.MapMouseEvent) => void;
+    handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
+    updatePreview?: (points: [number, number][], currentPoint?: [number, number]) => void;
+  }>({});
+
   // Terrain Controls
   const [terrainSource, setTerrainSource] = useState('mapbox-dem');
   const [terrainEnabled, setTerrainEnabled] = useState(true);
@@ -219,12 +364,13 @@ const Map: React.FC<MapProps> = ({
 
 
   // Source Management
+  type GeoJSONData = GeoJSON.Feature | GeoJSON.FeatureCollection | GeoJSON.Geometry;
   const [customSources, setCustomSources] = useState<Array<{
     id: string;
     type: 'geojson' | 'image' | 'video' | 'raster' | 'vector';
     url?: string;
     tiles?: string[];
-    data?: any;
+    data?: GeoJSONData | string;
   }>>([]);
 
   // Language/Localization
@@ -394,6 +540,7 @@ const Map: React.FC<MapProps> = ({
         if (draw && map.current) {
           try {
           map.current.removeControl(draw);
+          setDraw(null); // Clear the state when removing the control
           } catch (error) {
             console.log('Error removing draw control:', error);
           }
@@ -409,13 +556,15 @@ const Map: React.FC<MapProps> = ({
         map.current.boxZoom.enable();
         
         // Add draw control back if it doesn't exist
+        // Since we set draw to null when removing it, we can just check if draw is null
         if (!draw && map.current) {
           try {
-          const drawInstance = new (MapboxDraw as any)({
+          const DrawConstructor = MapboxDraw as unknown as MapboxDrawConstructor;
+          const drawInstance = new DrawConstructor({
             displayControlsDefault: false,
             controls: { polygon: false, trash: false },
             modes: {
-              ...(MapboxDraw as any).modes,
+              ...(DrawConstructor.modes || {}),
               draw_polygon: FreehandMode
             }
           });
@@ -427,7 +576,7 @@ const Map: React.FC<MapProps> = ({
         }
       }
     }
-  }, [isSlideshowMode]);
+  }, [isSlideshowMode]); // Removed 'draw' from dependencies to prevent logic error
 
 
 
@@ -779,8 +928,309 @@ const Map: React.FC<MapProps> = ({
     };
   };
 
+  // Cloud area selection functions
+  const startCloudAreaSelection = () => {
+    if (!map.current) return;
+    
+    // If already selecting, finish the polygon
+    if (isSelectingCloudArea) {
+      finishCloudAreaSelection();
+      return;
+    }
+    
+    setIsSelectingCloudArea(true);
+    setCloudAreaPolygon([]);
+    cloudAreaPointsRef.current = [];
+    
+    // Create sources and layers for polygon preview
+    if (!map.current.getSource('cloud-area-preview')) {
+      map.current.addSource('cloud-area-preview', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [[]]
+          }
+        }
+      });
+    }
+    
+    if (!map.current.getSource('cloud-area-points')) {
+      map.current.addSource('cloud-area-points', {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: []
+        }
+      });
+    }
+    
+    if (!map.current.getLayer('cloud-area-preview')) {
+      map.current.addLayer({
+        id: 'cloud-area-preview',
+        type: 'fill',
+        source: 'cloud-area-preview',
+        paint: {
+          'fill-color': '#90caf9',
+          'fill-opacity': 0.2
+        }
+      });
+      
+      map.current.addLayer({
+        id: 'cloud-area-preview-outline',
+        type: 'line',
+        source: 'cloud-area-preview',
+        paint: {
+          'line-color': '#90caf9',
+          'line-width': 2,
+          'line-dasharray': [2, 2]
+        }
+      });
+      
+      map.current.addLayer({
+        id: 'cloud-area-points',
+        type: 'circle',
+        source: 'cloud-area-points',
+        paint: {
+          'circle-radius': 6,
+          'circle-color': '#90caf9',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+    }
+    
+    const updatePreview = (points: [number, number][], currentPoint?: [number, number]) => {
+      if (!map.current) return;
+      
+      const source = map.current.getSource('cloud-area-preview') as mapboxgl.GeoJSONSource;
+      const pointsSource = map.current.getSource('cloud-area-points') as mapboxgl.GeoJSONSource;
+      
+      if (points.length === 0) {
+        if (source) {
+          source.setData({
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[]]
+            }
+          });
+        }
+        if (pointsSource) {
+          pointsSource.setData({
+            type: 'FeatureCollection',
+            features: []
+          });
+        }
+        return;
+      }
+      
+      // Create polygon coordinates (close the polygon)
+      let polygonCoords = [...points];
+      if (currentPoint) {
+        polygonCoords = [...points, currentPoint];
+      }
+      // Close the polygon by adding the first point at the end
+      if (polygonCoords.length > 0) {
+        polygonCoords.push(polygonCoords[0]);
+      }
+      
+      if (source) {
+        source.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [polygonCoords]
+          }
+        });
+      }
+      
+      // Update points
+      if (pointsSource) {
+        pointsSource.setData({
+          type: 'FeatureCollection',
+          features: points.map((point, index) => ({
+            type: 'Feature',
+            properties: { index },
+            geometry: {
+              type: 'Point',
+              coordinates: point
+            }
+          }))
+        });
+      }
+    };
+    
+    const handleClick = (e: mapboxgl.MapMouseEvent) => {
+      e.originalEvent?.preventDefault();
+      e.originalEvent?.stopPropagation();
+      
+      const newPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      cloudAreaPointsRef.current = [...cloudAreaPointsRef.current, newPoint];
+      setCloudAreaPolygon([...cloudAreaPointsRef.current]);
+      if (cloudAreaHandlersRef.current.updatePreview) {
+        cloudAreaHandlersRef.current.updatePreview(cloudAreaPointsRef.current);
+      }
+    };
+    
+    const handleDoubleClick = (e: mapboxgl.MapMouseEvent) => {
+      e.originalEvent?.preventDefault();
+      e.originalEvent?.stopPropagation();
+      
+      // Finish the polygon on double click
+      finishCloudAreaSelection();
+    };
+    
+    const handleMouseMove = (e: mapboxgl.MapMouseEvent) => {
+      const currentPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      if (cloudAreaPointsRef.current.length > 0 && cloudAreaHandlersRef.current.updatePreview) {
+        cloudAreaHandlersRef.current.updatePreview(cloudAreaPointsRef.current, currentPoint);
+      }
+    };
+    
+    // Store handlers and updatePreview in ref
+    cloudAreaHandlersRef.current = {
+      handleClick,
+      handleDoubleClick,
+      handleMouseMove,
+      updatePreview
+    };
+    
+    // Add event listeners
+    map.current.on('click', handleClick);
+    map.current.on('dblclick', handleDoubleClick);
+    map.current.on('mousemove', handleMouseMove);
+    
+    // Change cursor to crosshair
+    if (map.current.getCanvas()) {
+      map.current.getCanvas().style.cursor = 'crosshair';
+    }
+  };
+  
+  const finishCloudAreaSelection = () => {
+    const points = cloudAreaPointsRef.current;
+    if (!map.current || points.length < 3) {
+      alert('Please add at least 3 points to create a cloud area');
+      setIsSelectingCloudArea(false);
+      return;
+    }
+    
+    // Calculate bounds from polygon
+    let minLng = Infinity, maxLng = -Infinity;
+    let minLat = Infinity, maxLat = -Infinity;
+    
+    points.forEach(([lng, lat]) => {
+      minLng = Math.min(minLng, lng);
+      maxLng = Math.max(maxLng, lng);
+      minLat = Math.min(minLat, lat);
+      maxLat = Math.max(maxLat, lat);
+    });
+    
+    const bounds = new mapboxgl.LngLatBounds(
+      [minLng, minLat],
+      [maxLng, maxLat]
+    );
+    
+    setCloudAreaBounds(bounds);
+    
+    // Store the polygon
+    const closedPolygon = [...points, points[0]]; // Close the polygon
+    setCloudAreaPolygon(closedPolygon);
+    
+    // Update the preview to show the final polygon
+    const source = map.current.getSource('cloud-area-preview') as mapboxgl.GeoJSONSource;
+    if (source) {
+      source.setData({
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [closedPolygon]
+        }
+      });
+    }
+    
+    // Remove event listeners
+    if (cloudAreaHandlersRef.current.handleClick) {
+      map.current.off('click', cloudAreaHandlersRef.current.handleClick);
+    }
+    if (cloudAreaHandlersRef.current.handleDoubleClick) {
+      map.current.off('dblclick', cloudAreaHandlersRef.current.handleDoubleClick);
+    }
+    if (cloudAreaHandlersRef.current.handleMouseMove) {
+      map.current.off('mousemove', cloudAreaHandlersRef.current.handleMouseMove);
+    }
+    
+    // Clear handlers
+    cloudAreaHandlersRef.current = {};
+    
+    // Exit selection mode
+    setIsSelectingCloudArea(false);
+    
+    // Reset cursor
+    if (map.current.getCanvas()) {
+      map.current.getCanvas().style.cursor = '';
+    }
+    
+    // Regenerate clouds in the selected area
+    if (cloudsEnabled) {
+      addClouds();
+    }
+  };
+
+  const clearCloudArea = () => {
+    if (map.current) {
+      // Remove event listeners if in selection mode
+      if (isSelectingCloudArea && cloudAreaHandlersRef.current) {
+        if (cloudAreaHandlersRef.current.handleClick) {
+          map.current.off('click', cloudAreaHandlersRef.current.handleClick);
+        }
+        if (cloudAreaHandlersRef.current.handleDoubleClick) {
+          map.current.off('dblclick', cloudAreaHandlersRef.current.handleDoubleClick);
+        }
+        if (cloudAreaHandlersRef.current.handleMouseMove) {
+          map.current.off('mousemove', cloudAreaHandlersRef.current.handleMouseMove);
+        }
+        cloudAreaHandlersRef.current = {};
+      }
+      
+      setCloudAreaBounds(null);
+      setCloudAreaPolygon([]);
+      cloudAreaPointsRef.current = [];
+      
+      // Clean up preview layers if they exist
+      if (map.current.getLayer('cloud-area-preview')) {
+        map.current.removeLayer('cloud-area-preview');
+        map.current.removeLayer('cloud-area-preview-outline');
+        map.current.removeLayer('cloud-area-points');
+      }
+      if (map.current.getSource('cloud-area-preview')) {
+        map.current.removeSource('cloud-area-preview');
+      }
+      if (map.current.getSource('cloud-area-points')) {
+        map.current.removeSource('cloud-area-points');
+      }
+      
+      // Reset cursor
+      if (map.current.getCanvas()) {
+        map.current.getCanvas().style.cursor = '';
+      }
+      
+      setIsSelectingCloudArea(false);
+      
+      // Regenerate clouds without area restriction
+      if (cloudsEnabled) {
+        addClouds();
+      }
+    }
+  };
+
   // Add stars for night sky
-  const addStars = () => {
+  const addStars = useCallback(() => {
     if (map.current && map.current.isStyleLoaded()) {
       try {
         // Remove existing stars first
@@ -817,10 +1267,10 @@ const Map: React.FC<MapProps> = ({
         console.error('Error adding stars:', error);
       }
     }
-  };
+  }, []); // generateStars is stable, map.current is a ref
 
   // Remove stars
-  const removeStars = () => {
+  const removeStars = useCallback(() => {
     if (map.current && map.current.isStyleLoaded()) {
       try {
         if (map.current.getLayer('stars')) {
@@ -834,7 +1284,194 @@ const Map: React.FC<MapProps> = ({
         console.error('Error removing stars:', error);
       }
     }
-  };
+  }, []); // map.current is a ref
+
+  // Generate cloud GeoJSON data
+  const generateClouds = useCallback((bounds: mapboxgl.LngLatBounds | null = null, density = 5, size = 0.5) => {
+    const clouds: GeoJSON.Feature[] = [];
+    
+    // Determine area for cloud generation
+    let minLng: number, maxLng: number, minLat: number, maxLat: number;
+    
+    if (bounds) {
+      // Use selected area bounds
+      const sw = bounds.getSouthWest();
+      const ne = bounds.getNorthEast();
+      minLng = sw.lng;
+      maxLng = ne.lng;
+      minLat = sw.lat;
+      maxLat = ne.lat;
+    } else {
+      // Default: use current map center with spread
+      const center = map.current?.getCenter() || { lng: -122.4194, lat: 37.7749 };
+      const spread = 0.15; // 0.15 degrees spread
+      minLng = center.lng - spread;
+      maxLng = center.lng + spread;
+      minLat = center.lat - spread;
+      maxLat = center.lat + spread;
+    }
+    
+    // Generate clouds for each selected type
+    if (selectedCloudTypes.length === 0) {
+      return { type: 'FeatureCollection' as const, features: [] };
+    }
+    
+    const cloudsPerType = Math.ceil(density / selectedCloudTypes.length);
+    
+    selectedCloudTypes.forEach((cloudTypeKey) => {
+      const cloudType = cloudTypes[cloudTypeKey as keyof typeof cloudTypes];
+      if (!cloudType) return;
+      
+      const typeDensity = Math.ceil(cloudsPerType * cloudType.densityMultiplier);
+      const baseSize = 0.05 * size * cloudType.sizeMultiplier;
+      
+      for (let i = 0; i < typeDensity; i++) {
+        // Random position within bounds
+        const offsetLng = minLng + Math.random() * (maxLng - minLng);
+        const offsetLat = minLat + Math.random() * (maxLat - minLat);
+        
+        // Cloud size variation based on type
+        const cloudSize = baseSize * (0.8 + Math.random() * 1.5);
+      
+      // Create a cloud shape using a polygon with extremely smooth, rounded edges
+      const points: [number, number][] = [];
+      const numPoints = 48 + Math.floor(Math.random() * 24); // 48-72 points for extremely smooth, rounded edges
+      
+      // Generate initial radius variations
+      const radiusVariations: number[] = [];
+      for (let k = 0; k < numPoints; k++) {
+        radiusVariations.push(0.4 + Math.random() * 0.6); // Base variation
+      }
+      
+      // Apply multiple passes of smoothing for very rounded edges
+      let smoothedRadii = [...radiusVariations];
+      const smoothingPasses = 3; // Multiple passes for extra smoothness
+      
+      for (let pass = 0; pass < smoothingPasses; pass++) {
+        const newSmoothed: number[] = [];
+        for (let k = 0; k < numPoints; k++) {
+          const prev = smoothedRadii[(k - 1 + numPoints) % numPoints];
+          const curr = smoothedRadii[k];
+          const next = smoothedRadii[(k + 1) % numPoints];
+          const prev2 = smoothedRadii[(k - 2 + numPoints) % numPoints];
+          const next2 = smoothedRadii[(k + 2) % numPoints];
+          // Weighted average with more neighbors for smoother curves
+          newSmoothed.push(
+            prev2 * 0.1 + prev * 0.2 + curr * 0.4 + next * 0.2 + next2 * 0.1
+          );
+        }
+        smoothedRadii = newSmoothed;
+      }
+      
+      // Generate points with smooth, rounded edges
+      for (let j = 0; j < numPoints; j++) {
+        const angle = (j / numPoints) * Math.PI * 2;
+        // Use heavily smoothed radius for very rounded appearance
+        const radius = cloudSize * (0.75 + smoothedRadii[j] * 0.5); // Very smooth, rounded shape
+        points.push([
+          offsetLng + Math.cos(angle) * radius,
+          offsetLat + Math.sin(angle) * radius
+        ]);
+      }
+      
+      // Close the polygon
+      points.push(points[0]);
+      
+      // Use cloud type specific properties
+      const baseAltitude = cloudType.baseAltitude + (Math.random() - 0.5) * cloudType.altitudeRange;
+      const cloudHeight = cloudType.height + (Math.random() - 0.5) * cloudType.heightRange;
+      const cloudOpacity = cloudType.opacity + (Math.random() - 0.5) * 0.1; // Slight variation
+      
+      clouds.push({
+        type: 'Feature',
+        id: `cloud-${cloudTypeKey}-${i}`,
+        properties: {
+          id: `cloud-${cloudTypeKey}-${i}`,
+          cloudType: cloudTypeKey,
+          opacity: Math.max(0.1, Math.min(1.0, cloudOpacity)), // Clamp opacity
+          size: cloudSize,
+          baseAltitude: Math.max(0, baseAltitude), // Ensure non-negative
+          height: Math.max(100, cloudHeight), // Minimum 100m thickness
+          color: cloudType.color
+        },
+        geometry: {
+          type: 'Polygon',
+          coordinates: [points]
+        }
+      });
+    }
+    });
+    
+    return {
+      type: 'FeatureCollection' as const,
+      features: clouds
+    };
+  }, [selectedCloudTypes]);
+
+  // Add clouds to the map
+  const addClouds = useCallback(() => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        // Remove existing clouds first
+        if (map.current.getLayer('clouds')) {
+          map.current.removeLayer('clouds');
+        }
+        if (map.current.getSource('clouds')) {
+          map.current.removeSource('clouds');
+        }
+        
+        // Use selected cloud area bounds if available, otherwise use default
+        const cloudData = generateClouds(cloudAreaBounds, cloudDensity, cloudSize);
+        
+        // Add cloud source
+        map.current.addSource('clouds', {
+          type: 'geojson',
+          data: cloudData
+        });
+        
+        // Add 3D cloud layer above buildings but below sky
+        // Try to add before sky layer, or if sky doesn't exist, add at the end
+        const beforeLayer = map.current.getLayer('sky') ? 'sky' : undefined;
+        map.current.addLayer({
+          id: 'clouds',
+          type: 'fill-extrusion',
+          source: 'clouds',
+          paint: {
+            'fill-extrusion-color': ['get', 'color'] as any, // Use color from cloud type
+            'fill-extrusion-opacity': ['get', 'opacity'] as any, // Use opacity from cloud type
+            'fill-extrusion-base': ['get', 'baseAltitude'] as any, // Base altitude from properties
+            'fill-extrusion-height': ['get', 'height'] as any, // Height from properties
+            'fill-extrusion-vertical-gradient': true // Enable gradient for more 3D depth effect
+          } as any
+        }, beforeLayer);
+        
+        console.log('Clouds added to map');
+      } catch (error) {
+        console.error('Error adding clouds:', error);
+      }
+    }
+  }, [cloudDensity, cloudSize, cloudAreaBounds, selectedCloudTypes, generateClouds]);
+
+  // Remove clouds from the map
+  const removeClouds = useCallback(() => {
+    if (map.current && map.current.isStyleLoaded()) {
+      try {
+        if (map.current.getLayer('clouds')) {
+          map.current.removeLayer('clouds');
+        }
+        if (map.current.getSource('clouds')) {
+          map.current.removeSource('clouds');
+        }
+        if (cloudAnimationRef.current) {
+          clearTimeout(cloudAnimationRef.current);
+          cloudAnimationRef.current = null;
+        }
+        console.log('Clouds removed');
+      } catch (error) {
+        console.error('Error removing clouds:', error);
+      }
+    }
+  }, []);
 
   // Function to interpolate between colors
   const interpolateColor = (color1: string, color2: string, factor: number): string => {
@@ -957,7 +1594,7 @@ const Map: React.FC<MapProps> = ({
 
 
   // Function to apply sky layer properties
-  const applySkyProperties = () => {
+  const applySkyProperties = useCallback(() => {
     if (map.current && map.current.isStyleLoaded()) {
       try {
         // Apply sky layer type
@@ -990,7 +1627,7 @@ const Map: React.FC<MapProps> = ({
         console.error('Error applying sky properties:', error);
       }
     }
-  };
+  }, [skyLayerType, skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]);
 
   // Function to change sky type
   const changeSkyType = (newSkyType: 'blue' | 'evening' | 'night' | 'sunrise') => {
@@ -1573,16 +2210,16 @@ const Map: React.FC<MapProps> = ({
           'type': 'sky',
           'paint': {
             'sky-type': 'atmosphere',
-            'sky-atmosphere-sun': [sunAzimuth, sunElevation],
-            'sky-atmosphere-sun-intensity': sunIntensity,
-            'sky-atmosphere-halo-color': haloColor,
-            'sky-atmosphere-color': atmosphereColor,
+            'sky-atmosphere-sun': [sunAzimuthRef.current, sunElevationRef.current],
+            'sky-atmosphere-sun-intensity': sunIntensityRef.current,
+            'sky-atmosphere-halo-color': haloColorRef.current,
+            'sky-atmosphere-color': atmosphereColorRef.current,
             'sky-opacity': 1.0
           } as any
         });
         
         // Set background - force black for space view
-        const bgColor = shouldForceSpaceView ? '#000000' : backgroundColor;
+        const bgColor = shouldForceSpaceView ? '#000000' : backgroundColorRef.current;
         if (currentMap.getLayer('background')) {
           currentMap.setPaintProperty('background', 'background-color', bgColor);
         } else {
@@ -1876,7 +2513,10 @@ const Map: React.FC<MapProps> = ({
     
     // Start the buildings addition process
     addBuildings();
-  }, [layers3D, style, terrainExaggeration]);
+  }, [layers3D, style, terrainExaggeration, skyLayerType, skyType, buildingColor, addStars, removeStars]);
+  // Note: Removed sunAzimuth, sunElevation, sunIntensity, haloColor, atmosphereColor, backgroundColor
+  // from dependencies because these are updated during sun cycle animation and should not
+  // trigger full layer re-initialization. They are updated via applySkyProperties instead.
 
   // Function to update building colors with height-based shading and refresh all 3D features
   const updateBuildingColors = useCallback((baseColor: string) => {
@@ -1933,14 +2573,14 @@ const Map: React.FC<MapProps> = ({
     if (map.current && map.current.isStyleLoaded()) {
       updateBuildingColors(buildingColor);
     }
-  }, [buildingColor]);
+  }, [buildingColor, updateBuildingColors]);
 
   // Apply sky properties when they change
   useEffect(() => {
     if (map.current && map.current.isStyleLoaded()) {
       applySkyProperties();
     }
-  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]);
+  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity, applySkyProperties]);
 
   // Auto-start sun cycle when enabled by default
   useEffect(() => {
@@ -1953,14 +2593,16 @@ const Map: React.FC<MapProps> = ({
         }
       }, 1500);
     }
-  }, [map.current, isSunCycleEnabled]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSunCycleEnabled]); // map.current is a ref, startSunCycle is stable
 
   // Restart sun cycle when duration changes
   useEffect(() => {
     if (isCycleRunningRef.current) {
       startSunCycle();
     }
-  }, [sunCycleDuration]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sunCycleDuration]); // startSunCycle is stable
 
   // Cleanup sun cycle on unmount
   useEffect(() => {
@@ -2066,7 +2708,7 @@ const Map: React.FC<MapProps> = ({
                 (opacity === '0.3' || opacity === '0.5' || opacity === '0.7' || opacity === '0.8') &&
                 (zIndex === '1000' || zIndex === '999' || zIndex === '1001' || zIndex === '9999')
               ) {
-                console.log('🔵 Auto-converting new dark overlay to vibrant blue:', element);
+                console.log('Auto-converting new dark overlay to vibrant blue:', element);
                 (element as HTMLElement).style.background = 'linear-gradient(180deg, #00BFFF 0%, #1E90FF 50%, #4169E1 100%)';
                 (element as HTMLElement).style.opacity = '0.6';
                 (element as HTMLElement).style.zIndex = '1000';
@@ -2852,12 +3494,13 @@ const Map: React.FC<MapProps> = ({
     }
 
     return () => {
-      if (map.current && !(map.current as any)._removed) {
+      const currentMap = map.current as MapboxMapWithInternal | null;
+      if (currentMap && !currentMap._removed) {
         try {
-          if (navControlRef.current) map.current.removeControl(navControlRef.current);
-          if (geolocateControlRef.current) map.current.removeControl(geolocateControlRef.current);
-          if (fullscreenControlRef.current) map.current.removeControl(fullscreenControlRef.current);
-          if (scaleControlRef.current) map.current.removeControl(scaleControlRef.current);
+          if (navControlRef.current) currentMap.removeControl(navControlRef.current);
+          if (geolocateControlRef.current) currentMap.removeControl(geolocateControlRef.current);
+          if (fullscreenControlRef.current) currentMap.removeControl(fullscreenControlRef.current);
+          if (scaleControlRef.current) currentMap.removeControl(scaleControlRef.current);
         } catch (e) {
           // Controls may not exist, ignore error
         }
@@ -2865,6 +3508,48 @@ const Map: React.FC<MapProps> = ({
     };
   }, [showZoomControls, showCompass, showRotationControls, showPitchControls, showGeolocation, showFullscreen, showScale]);
 
+  // Implement Clouds
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+    
+    if (cloudsEnabled) {
+      addClouds();
+    } else {
+      removeClouds();
+    }
+    
+    return () => {
+      if (!cloudsEnabled) {
+        removeClouds();
+      }
+    };
+  }, [cloudsEnabled, addClouds, removeClouds]);
+
+  // Update cloud properties when they change
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded() || !cloudsEnabled) return;
+    
+    try {
+      if (map.current.getLayer('clouds')) {
+        map.current.setPaintProperty('clouds', 'fill-extrusion-color', cloudColor);
+        map.current.setPaintProperty('clouds', 'fill-extrusion-opacity', cloudOpacity);
+      }
+    } catch (error) {
+      console.error('Error updating cloud properties:', error);
+    }
+  }, [cloudColor, cloudOpacity, cloudsEnabled]);
+
+  // Regenerate clouds when density or size changes
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded() || !cloudsEnabled) return;
+    
+    // Small delay to avoid too frequent updates
+    const timeoutId = setTimeout(() => {
+      addClouds();
+    }, 300);
+    
+    return () => clearTimeout(timeoutId);
+  }, [cloudDensity, cloudSize, cloudsEnabled, addClouds]);
 
   // Implement Fog (careful not to interfere with sky)
   useEffect(() => {
@@ -2875,7 +3560,12 @@ const Map: React.FC<MapProps> = ({
         // Only add fog if sky exists and we want fog
         const fogLayer = map.current.getLayer('fog');
         if (!fogLayer) {
-          (map.current.addLayer as any)({
+          // Fog layer type is valid but may not be in types
+          const mapWithFog = map.current as mapboxgl.Map & {
+            addLayer: (layer: unknown, beforeId?: string) => void;
+            setPaintProperty: (layer: string, property: string, value: unknown) => void;
+          };
+          mapWithFog.addLayer({
             id: 'fog',
             type: 'fog',
             paint: {
@@ -2888,11 +3578,14 @@ const Map: React.FC<MapProps> = ({
             }
           }, 'sky');
         } else {
-          (map.current.setPaintProperty as any)('fog', 'fog-color', fogColor);
-          (map.current.setPaintProperty as any)('fog', 'fog-high-color', fogHighColor);
-          (map.current.setPaintProperty as any)('fog', 'fog-space-color', fogSpaceColor);
-          (map.current.setPaintProperty as any)('fog', 'fog-star-intensity', fogStarIntensity);
-          (map.current.setPaintProperty as any)('fog', 'fog-range', fogRange);
+          const mapWithFog = map.current as mapboxgl.Map & {
+            setPaintProperty: (layer: string, property: string, value: unknown) => void;
+          };
+          mapWithFog.setPaintProperty('fog', 'fog-color', fogColor);
+          mapWithFog.setPaintProperty('fog', 'fog-high-color', fogHighColor);
+          mapWithFog.setPaintProperty('fog', 'fog-space-color', fogSpaceColor);
+          mapWithFog.setPaintProperty('fog', 'fog-star-intensity', fogStarIntensity);
+          mapWithFog.setPaintProperty('fog', 'fog-range', fogRange);
         }
       } else {
         // Remove fog layer if disabled
@@ -2922,13 +3615,20 @@ const Map: React.FC<MapProps> = ({
         }
         
         // Set terrain with current exaggeration
-        (map.current as any).setTerrain({ 
-          source: 'mapbox-dem', 
-          exaggeration: terrainExaggeration 
-        });
+        // Note: setTerrain is available in mapbox-gl but may not be in types
+        const mapWithTerrain = map.current as mapboxgl.Map & { setTerrain?: (terrain: { source: string; exaggeration: number } | null) => void };
+        if (mapWithTerrain.setTerrain) {
+          mapWithTerrain.setTerrain({ 
+            source: 'mapbox-dem', 
+            exaggeration: terrainExaggeration 
+          });
+        }
       } else {
         // Remove terrain if disabled
-        (map.current as any).setTerrain(null);
+        const mapWithTerrain = map.current as mapboxgl.Map & { setTerrain?: (terrain: { source: string; exaggeration: number } | null) => void };
+        if (mapWithTerrain.setTerrain) {
+          mapWithTerrain.setTerrain(null);
+        }
       }
     } catch (e) {
       console.warn('Terrain management error:', e);
@@ -2992,7 +3692,7 @@ const Map: React.FC<MapProps> = ({
         }
       });
     }
-  }, [trafficLayerVisible, transitLayerVisible, waterLayerVisible, landuseLayerVisible, placeLabelsVisible, poiLabelsVisible, roadLabelsVisible, transportLabelsVisible]);
+  }, [trafficLayerVisible, transitLayerVisible, waterLayerVisible, landuseLayerVisible, placeLabelsVisible, poiLabelsVisible, roadLabelsVisible, transportLabelsVisible]); // All dependencies included
 
   // Re-run layer visibility when style loads
   useEffect(() => {
@@ -3010,8 +3710,9 @@ const Map: React.FC<MapProps> = ({
 
     map.current.on('style.load', handleStyleLoad);
     return () => {
-      if (map.current && !(map.current as any)._removed) {
-        map.current.off('style.load', handleStyleLoad);
+      const currentMap = map.current as MapboxMapWithInternal | null;
+      if (currentMap && !currentMap._removed) {
+        currentMap.off('style.load', handleStyleLoad);
       }
     };
   }, []);
@@ -3053,7 +3754,7 @@ const Map: React.FC<MapProps> = ({
     } catch (e) {
       console.warn('3D Building management error:', e);
     }
-  }, [buildings3DEnabled, buildingExtrusionHeight, buildingOpacity]);
+  }, [buildings3DEnabled, buildingExtrusionHeight, buildingOpacity]); // All dependencies included
 
   // Re-run 3D buildings when style loads
   useEffect(() => {
@@ -3069,8 +3770,9 @@ const Map: React.FC<MapProps> = ({
 
     map.current.on('style.load', handleStyleLoad);
     return () => {
-      if (map.current && !(map.current as any)._removed) {
-        map.current.off('style.load', handleStyleLoad);
+      const currentMap = map.current as MapboxMapWithInternal | null;
+      if (currentMap && !currentMap._removed) {
+        currentMap.off('style.load', handleStyleLoad);
       }
     };
   }, []);
@@ -3156,14 +3858,15 @@ const Map: React.FC<MapProps> = ({
     map.current.on('pitch', updateMapState);
 
     return () => {
-      if (map.current && !(map.current as any)._removed) {
-        map.current.off('move', updateMapState);
-        map.current.off('zoom', updateMapState);
-        map.current.off('rotate', updateMapState);
-        map.current.off('pitch', updateMapState);
+      const currentMap = map.current as MapboxMapWithInternal | null;
+      if (currentMap && !currentMap._removed) {
+        currentMap.off('move', updateMapState);
+        currentMap.off('zoom', updateMapState);
+        currentMap.off('rotate', updateMapState);
+        currentMap.off('pitch', updateMapState);
       }
     };
-  }, [sunIntensity, atmosphereColor]);
+  }, [sunIntensity, atmosphereColor, backgroundColor, sunAzimuth, sunElevation]);
 
   // Marker Tools Implementation
   useEffect(() => {
@@ -3188,9 +3891,10 @@ const Map: React.FC<MapProps> = ({
       markerElement.style.border = '3px solid white';
       markerElement.style.cursor = 'pointer';
 
+      if (!map.current) return;
       const marker = new mapboxgl.Marker(markerElement)
         .setLngLat(coords)
-        .addTo(map.current!);
+        .addTo(map.current);
 
       if (popup) {
         marker.setPopup(new mapboxgl.Popup().setText(popup));
@@ -3203,8 +3907,9 @@ const Map: React.FC<MapProps> = ({
 
     map.current.on('click', handleMapClick);
     return () => {
-      if (map.current && !(map.current as any)._removed) {
-        map.current.off('click', handleMapClick);
+      const currentMap = map.current as MapboxMapWithInternal | null;
+      if (currentMap && !currentMap._removed) {
+        currentMap.off('click', handleMapClick);
       }
     };
   }, [showMarkerTools]);
@@ -3284,7 +3989,7 @@ const Map: React.FC<MapProps> = ({
       container: mapContainer.current,
       style: 'mapbox://styles/mapbox/satellite-streets-v12',
       center: [-122.431297, 37.773972], // San Francisco downtown
-      zoom: 15,
+      zoom: initialZoom, // Use the initialZoom prop
       pitch: 40,
       bearing: -30,
       antialias: true,
@@ -3302,9 +4007,11 @@ const Map: React.FC<MapProps> = ({
     }
 
     // Get default modes from a temporary instance
-    const defaultModes = (MapboxDraw as any).modes || (new (MapboxDraw as any)()).modes;
+    const DrawConstructor = MapboxDraw as unknown as MapboxDrawConstructor;
+    const tempInstance = new DrawConstructor();
+    const defaultModes = DrawConstructor.modes || (tempInstance as unknown as { modes?: MapboxDrawModes }).modes || {};
 
-    const drawInstance = new (MapboxDraw as any)({
+    const drawInstance = new DrawConstructor({
       displayControlsDefault: false,
       controls: { polygon: false, trash: false, rectangle: true },
       modes: {
@@ -3649,7 +4356,7 @@ const Map: React.FC<MapProps> = ({
         clearTimeout(cycleIntervalRef.current);
       }
     };
-  }, []);
+  }, [accessToken, initialZoom]); // Include initialZoom in dependencies
 
   // Add BridgeLayer after map initialization
   useEffect(() => {
@@ -5115,6 +5822,173 @@ const Map: React.FC<MapProps> = ({
                   )}
               </div>
             </div>
+
+              {/* Cloud Controls */}
+              <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#e3f2fd', borderRadius: '8px', border: '1px solid #90caf9' }}>
+                <h4 style={{ margin: '0 0 10px 0', fontSize: '16px', color: '#1565c0' }}>☁️ Cloud Controls</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ fontSize: '14px', color: '#333' }}>Enable Clouds</label>
+                    <input type="checkbox" checked={cloudsEnabled} onChange={(e) => setCloudsEnabled(e.target.checked)} />
+                  </div>
+                  {cloudsEnabled && (
+                    <>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '10px', fontWeight: '500' }}>
+                          Cloud Types
+                        </label>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '15px' }}>
+                          {Object.entries(cloudTypes).map(([key, type]) => (
+                            <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                              <input
+                                type="checkbox"
+                                checked={selectedCloudTypes.includes(key)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedCloudTypes([...selectedCloudTypes, key]);
+                                  } else {
+                                    setSelectedCloudTypes(selectedCloudTypes.filter(t => t !== key));
+                                  }
+                                }}
+                                style={{ marginTop: '2px' }}
+                              />
+                              <div style={{ flex: 1 }}>
+                                <label style={{ fontSize: '14px', color: '#333', cursor: 'pointer', fontWeight: '500' }}>
+                                  {type.name}
+                                </label>
+                                <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                                  {type.description}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {selectedCloudTypes.length === 0 && (
+                          <div style={{ 
+                            padding: '8px', 
+                            background: '#fff3cd', 
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            color: '#856404',
+                            marginBottom: '10px'
+                          }}>
+                            Please select at least one cloud type
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                          Cloud Density: {cloudDensity}
+                        </label>
+                        <input
+                          type="range"
+                          min="1"
+                          max="20"
+                          step="1"
+                          value={cloudDensity}
+                          onChange={(e) => setCloudDensity(Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                          Cloud Size (multiplier)
+                        </label>
+                        <input
+                          type="number"
+                          min="0.1"
+                          max="10"
+                          step="0.1"
+                          value={cloudSize}
+                          onChange={(e) => {
+                            const value = parseFloat(e.target.value);
+                            if (!isNaN(value) && value >= 0.1 && value <= 10) {
+                              setCloudSize(value);
+                            }
+                          }}
+                          style={{ 
+                            width: '100%', 
+                            padding: '8px', 
+                            fontSize: '14px', 
+                            border: '1px solid #ccc', 
+                            borderRadius: '4px' 
+                          }}
+                          placeholder="0.5"
+                        />
+                        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                          Recommended: 0.5-2.0 for small areas, 2.0-5.0 for large areas
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                        <button
+                          onClick={startCloudAreaSelection}
+                          style={{
+                            background: isSelectingCloudArea ? '#f44336' : '#4caf50',
+                            color: 'white',
+                            border: 'none',
+                            padding: '8px 16px',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            flex: 1
+                          }}
+                        >
+                          {isSelectingCloudArea ? 'Finish Selection (Double-click)' : 'Select Cloud Area'}
+                        </button>
+                        {cloudAreaBounds && (
+                          <button
+                            onClick={clearCloudArea}
+                            style={{
+                              background: '#ff9800',
+                              color: 'white',
+                              border: 'none',
+                              padding: '8px 16px',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              fontSize: '14px',
+                              flex: 1
+                            }}
+                          >
+                            Clear Area
+                          </button>
+                        )}
+                      </div>
+                      {cloudAreaBounds && (
+                        <div style={{ 
+                          marginTop: '10px', 
+                          padding: '8px', 
+                          background: '#e8f5e9', 
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          color: '#2e7d32'
+                        }}>
+                          Cloud area selected. Clouds will generate within this area.
+                        </div>
+                      )}
+                      <button
+                        onClick={() => {
+                          if (cloudsEnabled) {
+                            addClouds();
+                          }
+                        }}
+                        style={{
+                          background: '#2196f3',
+                          color: 'white',
+                          border: 'none',
+                          padding: '8px 16px',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                          width: '100%',
+                          marginTop: '10px'
+                        }}
+                      >
+                        Regenerate Clouds
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
 
               {/* Terrain Controls */}
               <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
