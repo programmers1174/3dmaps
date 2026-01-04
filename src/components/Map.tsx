@@ -170,7 +170,7 @@ const Map: React.FC<MapProps> = ({
   const [sunCycleDuration, setSunCycleDuration] = useState(30); // Duration in seconds
   const sunCycleIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCycleRunningRef = useRef(false);
-  
+
   // Refs to store latest sun cycle values to avoid recreating initializeLayers
   const sunAzimuthRef = useRef(sunAzimuth);
   const sunElevationRef = useRef(sunElevation);
@@ -241,99 +241,36 @@ const Map: React.FC<MapProps> = ({
   const [cloudOpacity, setCloudOpacity] = useState(0.6);
   const [cloudColor, setCloudColor] = useState('#ffffff');
   const [cloudSize, setCloudSize] = useState(0.5); // Size multiplier (0.1 to 2.0)
+  const [cloudHeight, setCloudHeight] = useState(2000); // Cloud height/thickness in meters
   const [cloudSpeed, setCloudSpeed] = useState(0.1); // Animation speed (0 to 1)
   const cloudAnimationRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Cloud type selection
-  const [selectedCloudTypes, setSelectedCloudTypes] = useState<string[]>(['cumulus']);
-  
-  // Cloud type definitions
-  const cloudTypes = {
-    cirrus: {
-      name: 'Cirrus',
-      description: 'High, thin, wispy clouds',
-      baseAltitude: 6000,
-      altitudeRange: 2000,
-      height: 500,
-      heightRange: 300,
-      sizeMultiplier: 0.3,
-      opacity: 0.4,
-      color: '#ffffff',
-      densityMultiplier: 1.5
-    },
-    altocumulus: {
-      name: 'Altocumulus',
-      description: 'Mid-level, puffy, layered clouds',
-      baseAltitude: 3000,
-      altitudeRange: 1500,
-      height: 800,
-      heightRange: 500,
-      sizeMultiplier: 0.6,
-      opacity: 0.5,
-      color: '#ffffff',
-      densityMultiplier: 1.2
-    },
-    stratus: {
-      name: 'Stratus',
-      description: 'Low, flat, uniform clouds',
-      baseAltitude: 500,
-      altitudeRange: 500,
-      height: 300,
-      heightRange: 200,
-      sizeMultiplier: 1.2,
-      opacity: 0.7,
-      color: '#e0e0e0',
-      densityMultiplier: 0.8
-    },
-    cumulus: {
-      name: 'Cumulus',
-      description: 'Puffy, cotton-like clouds',
-      baseAltitude: 1500,
-      altitudeRange: 1000,
-      height: 1200,
-      heightRange: 800,
-      sizeMultiplier: 1.0,
-      opacity: 0.6,
-      color: '#ffffff',
-      densityMultiplier: 1.0
-    },
-    cumulonimbus: {
-      name: 'Cumulonimbus',
-      description: 'Large, towering storm clouds',
-      baseAltitude: 500,
-      altitudeRange: 500,
-      height: 4000,
-      heightRange: 2000,
-      sizeMultiplier: 2.0,
-      opacity: 0.8,
-      color: '#a0a0a0',
-      densityMultiplier: 0.5
-    },
-    nimbostratus: {
-      name: 'Nimbostratus',
-      description: 'Low, dark, rain clouds',
-      baseAltitude: 800,
-      altitudeRange: 400,
-      height: 2000,
-      heightRange: 1000,
-      sizeMultiplier: 1.5,
-      opacity: 0.75,
-      color: '#808080',
-      densityMultiplier: 0.7
-    }
-  };
-  
-  // Cloud area selection state
-  const [isSelectingCloudArea, setIsSelectingCloudArea] = useState(false);
-  const [cloudAreaBounds, setCloudAreaBounds] = useState<mapboxgl.LngLatBounds | null>(null);
-  const [cloudAreaPolygon, setCloudAreaPolygon] = useState<[number, number][]>([]);
-  const cloudAreaPointsRef = useRef<[number, number][]>([]);
-  const cloudAreaHandlersRef = useRef<{
-    handleClick?: (e: mapboxgl.MapMouseEvent) => void;
-    handleDoubleClick?: (e: mapboxgl.MapMouseEvent) => void;
+  // Cloud brush mode state - new system
+  const [isCloudBrushMode, setIsCloudBrushMode] = useState(false);
+  const [brushSize, setBrushSize] = useState(1000); // Brush size in meters
+  const [mousePosition, setMousePosition] = useState<mapboxgl.LngLat | null>(null);
+  const [brushClouds, setBrushClouds] = useState<Array<{
+    id: string;
+    center: [number, number]; // [lng, lat]
+    size: number; // Cloud size in meters (fixed per cloud)
+    height: number; // Cloud altitude
+    clickCount: number; // Number of times clicked at this location
+  }>>([]);
+  const brushCloudsRef = useRef<Array<{
+    id: string;
+    center: [number, number];
+    size: number;
+    height: number;
+    clickCount: number;
+  }>>([]);
+  const cloudHeightRef = useRef(cloudHeight);
+  const cloudOpacityRef = useRef(cloudOpacity);
+  const cloudColorRef = useRef(cloudColor);
+  const brushModeHandlersRef = useRef<{
     handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
-    updatePreview?: (points: [number, number][], currentPoint?: [number, number]) => void;
+    handleClick?: (e: mapboxgl.MapMouseEvent) => void;
   }>({});
+
 
   // Terrain Controls
   const [terrainSource, setTerrainSource] = useState('mapbox-dem');
@@ -928,23 +865,39 @@ const Map: React.FC<MapProps> = ({
     };
   };
 
-  // Cloud area selection functions
-  const startCloudAreaSelection = () => {
-    if (!map.current) return;
+
+  // Helper function to create a circle polygon from center and radius (in meters)
+  const createCirclePolygon = (center: [number, number], radiusMeters: number, numPoints = 32): [number, number][] => {
+    const points: [number, number][] = [];
+    const centerLat = center[1];
     
-    // If already selecting, finish the polygon
-    if (isSelectingCloudArea) {
-      finishCloudAreaSelection();
-      return;
+    // Convert meters to degrees (approximate, works well for small distances)
+    // 1 degree latitude ≈ 111,000 meters
+    // Longitude conversion depends on latitude
+    const radiusLat = radiusMeters / 111000;
+    const radiusLng = radiusMeters / (111000 * Math.cos(centerLat * Math.PI / 180));
+    
+    for (let i = 0; i < numPoints; i++) {
+      const angle = (i / numPoints) * Math.PI * 2;
+      const lat = centerLat + radiusLat * Math.sin(angle);
+      const lng = center[0] + radiusLng * Math.cos(angle);
+      points.push([lng, lat]);
     }
     
-    setIsSelectingCloudArea(true);
-    setCloudAreaPolygon([]);
-    cloudAreaPointsRef.current = [];
+    // Close the polygon
+    points.push(points[0]);
+    return points;
+  };
+
+  // Start cloud brush mode
+  const startCloudBrushMode = () => {
+    if (!map.current) return;
     
-    // Create sources and layers for polygon preview
-    if (!map.current.getSource('cloud-area-preview')) {
-      map.current.addSource('cloud-area-preview', {
+    setIsCloudBrushMode(true);
+    
+    // Create preview circle source and layer
+    if (!map.current.getSource('cloud-brush-preview')) {
+      map.current.addSource('cloud-brush-preview', {
         type: 'geojson',
         data: {
           type: 'Feature',
@@ -955,277 +908,195 @@ const Map: React.FC<MapProps> = ({
           }
         }
       });
-    }
-    
-    if (!map.current.getSource('cloud-area-points')) {
-      map.current.addSource('cloud-area-points', {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: []
-        }
-      });
-    }
-    
-    if (!map.current.getLayer('cloud-area-preview')) {
+      
       map.current.addLayer({
-        id: 'cloud-area-preview',
+        id: 'cloud-brush-preview',
         type: 'fill',
-        source: 'cloud-area-preview',
+        source: 'cloud-brush-preview',
         paint: {
-          'fill-color': '#90caf9',
+          'fill-color': '#4CAF50',
           'fill-opacity': 0.2
         }
       });
       
       map.current.addLayer({
-        id: 'cloud-area-preview-outline',
+        id: 'cloud-brush-preview-outline',
         type: 'line',
-        source: 'cloud-area-preview',
+        source: 'cloud-brush-preview',
         paint: {
-          'line-color': '#90caf9',
+          'line-color': '#4CAF50',
           'line-width': 2,
-          'line-dasharray': [2, 2]
-        }
-      });
-      
-      map.current.addLayer({
-        id: 'cloud-area-points',
-        type: 'circle',
-        source: 'cloud-area-points',
-        paint: {
-          'circle-radius': 6,
-          'circle-color': '#90caf9',
-          'circle-stroke-width': 2,
-          'circle-stroke-color': '#ffffff'
+          'line-opacity': 0.8
         }
       });
     }
     
-    const updatePreview = (points: [number, number][], currentPoint?: [number, number]) => {
-      if (!map.current) return;
+    // Mouse move handler to update preview circle and dots
+    const handleMouseMove = (e: mapboxgl.MapMouseEvent) => {
+      setMousePosition(e.lngLat);
       
-      const source = map.current.getSource('cloud-area-preview') as mapboxgl.GeoJSONSource;
-      const pointsSource = map.current.getSource('cloud-area-points') as mapboxgl.GeoJSONSource;
-      
-      if (points.length === 0) {
-        if (source) {
-          source.setData({
-            type: 'Feature',
-            properties: {},
-            geometry: {
-              type: 'Polygon',
-              coordinates: [[]]
-            }
-          });
-        }
-        if (pointsSource) {
-          pointsSource.setData({
-            type: 'FeatureCollection',
-            features: []
-          });
-        }
-        return;
-      }
-      
-      // Create polygon coordinates (close the polygon)
-      let polygonCoords = [...points];
-      if (currentPoint) {
-        polygonCoords = [...points, currentPoint];
-      }
-      // Close the polygon by adding the first point at the end
-      if (polygonCoords.length > 0) {
-        polygonCoords.push(polygonCoords[0]);
-      }
-      
+      // Update preview circle
+      const circle = createCirclePolygon([e.lngLat.lng, e.lngLat.lat], brushSize);
+      const source = map.current?.getSource('cloud-brush-preview') as mapboxgl.GeoJSONSource;
       if (source) {
         source.setData({
           type: 'Feature',
           properties: {},
           geometry: {
             type: 'Polygon',
-            coordinates: [polygonCoords]
+            coordinates: [circle]
           }
         });
       }
       
-      // Update points
-      if (pointsSource) {
-        pointsSource.setData({
-          type: 'FeatureCollection',
-          features: points.map((point, index) => ({
-            type: 'Feature',
-            properties: { index },
-            geometry: {
-              type: 'Point',
-              coordinates: point
-            }
-          }))
+      // Show preview dots for where clouds would appear
+      const previewClouds: GeoJSON.Feature[] = [];
+      const brushArea = Math.PI * Math.pow(brushSize, 2);
+      const baseCloudDensity = 0.0001;
+      const previewCount = Math.min(20, Math.floor(brushArea * baseCloudDensity)); // Max 20 preview dots
+      
+      for (let i = 0; i < previewCount; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const distance = Math.random() * brushSize;
+        const centerLat = e.lngLat.lat;
+        const radiusLat = distance / 111000;
+        const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+        const cloudLat = centerLat + radiusLat * Math.sin(angle);
+        const cloudLng = e.lngLat.lng + radiusLng * Math.cos(angle);
+        
+        previewClouds.push({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Point',
+            coordinates: [cloudLng, cloudLat]
+          }
         });
       }
+      
+      // Update preview points source
+      if (map.current) {
+        if (!map.current.getSource('cloud-brush-preview-points')) {
+          map.current.addSource('cloud-brush-preview-points', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: previewClouds
+            }
+          });
+          
+          map.current.addLayer({
+            id: 'cloud-brush-preview-points',
+            type: 'circle',
+            source: 'cloud-brush-preview-points',
+            paint: {
+              'circle-radius': 4,
+              'circle-color': '#4CAF50',
+              'circle-opacity': 0.6
+            }
+          });
+        } else {
+          const pointsSource = map.current.getSource('cloud-brush-preview-points') as mapboxgl.GeoJSONSource;
+          if (pointsSource) {
+            pointsSource.setData({
+              type: 'FeatureCollection',
+              features: previewClouds
+            });
+          }
+        }
+      }
     };
     
+    // Click handler to create clouds
     const handleClick = (e: mapboxgl.MapMouseEvent) => {
-      e.originalEvent?.preventDefault();
-      e.originalEvent?.stopPropagation();
+      const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
       
-      const newPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-      cloudAreaPointsRef.current = [...cloudAreaPointsRef.current, newPoint];
-      setCloudAreaPolygon([...cloudAreaPointsRef.current]);
-      if (cloudAreaHandlersRef.current.updatePreview) {
-        cloudAreaHandlersRef.current.updatePreview(cloudAreaPointsRef.current);
+      // Use ref to get current brushClouds to avoid stale closure
+      const currentClouds = brushCloudsRef.current;
+      
+      // Check if there's already a cloud at this location (within 50m)
+      const existingCloudIndex = currentClouds.findIndex(cloud => {
+        const distance = Math.sqrt(
+          Math.pow((cloud.center[0] - center[0]) * 111000 * Math.cos(center[1] * Math.PI / 180), 2) +
+          Math.pow((cloud.center[1] - center[1]) * 111000, 2)
+        );
+        return distance < 50; // 50 meter threshold
+      });
+      
+      if (existingCloudIndex >= 0) {
+        // Increase click count for existing cloud
+        const updatedClouds = [...currentClouds];
+        updatedClouds[existingCloudIndex].clickCount += 1;
+        brushCloudsRef.current = updatedClouds;
+        setBrushClouds(updatedClouds);
+      } else {
+        // Create new cloud group (use ref to get current cloudHeight to avoid stale closure)
+        const newCloud = {
+          id: `brush-cloud-${Date.now()}-${Math.random()}`,
+          center,
+          size: 200, // Fixed cloud size in meters
+          height: cloudHeightRef.current,
+          clickCount: 1
+        };
+        const updatedClouds = [...currentClouds, newCloud];
+        brushCloudsRef.current = updatedClouds;
+        setBrushClouds(updatedClouds);
+      }
+      
+      // Regenerate clouds
+      if (cloudsEnabled) {
+        addClouds();
       }
     };
     
-    const handleDoubleClick = (e: mapboxgl.MapMouseEvent) => {
-      e.originalEvent?.preventDefault();
-      e.originalEvent?.stopPropagation();
-      
-      // Finish the polygon on double click
-      finishCloudAreaSelection();
-    };
+    brushModeHandlersRef.current = { handleMouseMove, handleClick };
     
-    const handleMouseMove = (e: mapboxgl.MapMouseEvent) => {
-      const currentPoint: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-      if (cloudAreaPointsRef.current.length > 0 && cloudAreaHandlersRef.current.updatePreview) {
-        cloudAreaHandlersRef.current.updatePreview(cloudAreaPointsRef.current, currentPoint);
-      }
-    };
-    
-    // Store handlers and updatePreview in ref
-    cloudAreaHandlersRef.current = {
-      handleClick,
-      handleDoubleClick,
-      handleMouseMove,
-      updatePreview
-    };
-    
-    // Add event listeners
-    map.current.on('click', handleClick);
-    map.current.on('dblclick', handleDoubleClick);
     map.current.on('mousemove', handleMouseMove);
+    map.current.on('click', handleClick);
     
-    // Change cursor to crosshair
+    // Change cursor
     if (map.current.getCanvas()) {
       map.current.getCanvas().style.cursor = 'crosshair';
     }
   };
-  
-  const finishCloudAreaSelection = () => {
-    const points = cloudAreaPointsRef.current;
-    if (!map.current || points.length < 3) {
-      alert('Please add at least 3 points to create a cloud area');
-      setIsSelectingCloudArea(false);
-      return;
-    }
+
+  // Stop cloud brush mode
+  const stopCloudBrushMode = () => {
+    if (!map.current) return;
     
-    // Calculate bounds from polygon
-    let minLng = Infinity, maxLng = -Infinity;
-    let minLat = Infinity, maxLat = -Infinity;
-    
-    points.forEach(([lng, lat]) => {
-      minLng = Math.min(minLng, lng);
-      maxLng = Math.max(maxLng, lng);
-      minLat = Math.min(minLat, lat);
-      maxLat = Math.max(maxLat, lat);
-    });
-    
-    const bounds = new mapboxgl.LngLatBounds(
-      [minLng, minLat],
-      [maxLng, maxLat]
-    );
-    
-    setCloudAreaBounds(bounds);
-    
-    // Store the polygon
-    const closedPolygon = [...points, points[0]]; // Close the polygon
-    setCloudAreaPolygon(closedPolygon);
-    
-    // Update the preview to show the final polygon
-    const source = map.current.getSource('cloud-area-preview') as mapboxgl.GeoJSONSource;
-    if (source) {
-      source.setData({
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'Polygon',
-          coordinates: [closedPolygon]
-        }
-      });
-    }
+    setIsCloudBrushMode(false);
+    setMousePosition(null);
     
     // Remove event listeners
-    if (cloudAreaHandlersRef.current.handleClick) {
-      map.current.off('click', cloudAreaHandlersRef.current.handleClick);
+    if (brushModeHandlersRef.current.handleMouseMove) {
+      map.current.off('mousemove', brushModeHandlersRef.current.handleMouseMove);
     }
-    if (cloudAreaHandlersRef.current.handleDoubleClick) {
-      map.current.off('dblclick', cloudAreaHandlersRef.current.handleDoubleClick);
-    }
-    if (cloudAreaHandlersRef.current.handleMouseMove) {
-      map.current.off('mousemove', cloudAreaHandlersRef.current.handleMouseMove);
+    if (brushModeHandlersRef.current.handleClick) {
+      map.current.off('click', brushModeHandlersRef.current.handleClick);
     }
     
-    // Clear handlers
-    cloudAreaHandlersRef.current = {};
+    brushModeHandlersRef.current = {};
     
-    // Exit selection mode
-    setIsSelectingCloudArea(false);
+    // Remove preview layers
+    if (map.current.getLayer('cloud-brush-preview-points')) {
+      map.current.removeLayer('cloud-brush-preview-points');
+    }
+    if (map.current.getLayer('cloud-brush-preview-outline')) {
+      map.current.removeLayer('cloud-brush-preview-outline');
+    }
+    if (map.current.getLayer('cloud-brush-preview')) {
+      map.current.removeLayer('cloud-brush-preview');
+    }
+    if (map.current.getSource('cloud-brush-preview-points')) {
+      map.current.removeSource('cloud-brush-preview-points');
+    }
+    if (map.current.getSource('cloud-brush-preview')) {
+      map.current.removeSource('cloud-brush-preview');
+    }
     
     // Reset cursor
     if (map.current.getCanvas()) {
       map.current.getCanvas().style.cursor = '';
-    }
-    
-    // Regenerate clouds in the selected area
-    if (cloudsEnabled) {
-      addClouds();
-    }
-  };
-
-  const clearCloudArea = () => {
-    if (map.current) {
-      // Remove event listeners if in selection mode
-      if (isSelectingCloudArea && cloudAreaHandlersRef.current) {
-        if (cloudAreaHandlersRef.current.handleClick) {
-          map.current.off('click', cloudAreaHandlersRef.current.handleClick);
-        }
-        if (cloudAreaHandlersRef.current.handleDoubleClick) {
-          map.current.off('dblclick', cloudAreaHandlersRef.current.handleDoubleClick);
-        }
-        if (cloudAreaHandlersRef.current.handleMouseMove) {
-          map.current.off('mousemove', cloudAreaHandlersRef.current.handleMouseMove);
-        }
-        cloudAreaHandlersRef.current = {};
-      }
-      
-      setCloudAreaBounds(null);
-      setCloudAreaPolygon([]);
-      cloudAreaPointsRef.current = [];
-      
-      // Clean up preview layers if they exist
-      if (map.current.getLayer('cloud-area-preview')) {
-        map.current.removeLayer('cloud-area-preview');
-        map.current.removeLayer('cloud-area-preview-outline');
-        map.current.removeLayer('cloud-area-points');
-      }
-      if (map.current.getSource('cloud-area-preview')) {
-        map.current.removeSource('cloud-area-preview');
-      }
-      if (map.current.getSource('cloud-area-points')) {
-        map.current.removeSource('cloud-area-points');
-      }
-      
-      // Reset cursor
-      if (map.current.getCanvas()) {
-        map.current.getCanvas().style.cursor = '';
-      }
-      
-      setIsSelectingCloudArea(false);
-      
-      // Regenerate clouds without area restriction
-      if (cloudsEnabled) {
-        addClouds();
-      }
     }
   };
 
@@ -1286,127 +1157,65 @@ const Map: React.FC<MapProps> = ({
     }
   }, []); // map.current is a ref
 
-  // Generate cloud GeoJSON data
-  const generateClouds = useCallback((bounds: mapboxgl.LngLatBounds | null = null, density = 5, size = 0.5) => {
+  // Generate clouds from brush mode clicks
+  const generateCloudsFromBrush = useCallback((brushCloudsData: Array<{
+    id: string;
+    center: [number, number];
+    size: number;
+    height: number;
+    clickCount: number;
+  }>, brushSizeMeters: number) => {
     const clouds: GeoJSON.Feature[] = [];
     
-    // Determine area for cloud generation
-    let minLng: number, maxLng: number, minLat: number, maxLat: number;
-    
-    if (bounds) {
-      // Use selected area bounds
-      const sw = bounds.getSouthWest();
-      const ne = bounds.getNorthEast();
-      minLng = sw.lng;
-      maxLng = ne.lng;
-      minLat = sw.lat;
-      maxLat = ne.lat;
-    } else {
-      // Default: use current map center with spread
-      const center = map.current?.getCenter() || { lng: -122.4194, lat: 37.7749 };
-      const spread = 0.15; // 0.15 degrees spread
-      minLng = center.lng - spread;
-      maxLng = center.lng + spread;
-      minLat = center.lat - spread;
-      maxLat = center.lat + spread;
-    }
-    
-    // Generate clouds for each selected type
-    if (selectedCloudTypes.length === 0) {
-      return { type: 'FeatureCollection' as const, features: [] };
-    }
-    
-    const cloudsPerType = Math.ceil(density / selectedCloudTypes.length);
-    
-    selectedCloudTypes.forEach((cloudTypeKey) => {
-      const cloudType = cloudTypes[cloudTypeKey as keyof typeof cloudTypes];
-      if (!cloudType) return;
+    brushCloudsData.forEach((brushCloud) => {
+      // Calculate number of clouds based on brush size and click count
+      // Larger brush = more clouds, more clicks = more clouds
+      const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
+      const baseCloudDensity = 0.0001; // Clouds per square meter
+      const numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity * brushCloud.clickCount));
       
-      const typeDensity = Math.ceil(cloudsPerType * cloudType.densityMultiplier);
-      const baseSize = 0.05 * size * cloudType.sizeMultiplier;
+      // Fixed cloud size (200m radius)
+      const cloudSize = brushCloud.size;
       
-      for (let i = 0; i < typeDensity; i++) {
-        // Random position within bounds
-        const offsetLng = minLng + Math.random() * (maxLng - minLng);
-        const offsetLat = minLat + Math.random() * (maxLat - minLat);
+      for (let i = 0; i < numClouds; i++) {
+        // Random position within brush circle
+        const angle = Math.random() * Math.PI * 2;
+        const distance = Math.random() * brushSizeMeters;
+        const centerLat = brushCloud.center[1];
+        const radiusLat = distance / 111000;
+        const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+        const cloudLat = centerLat + radiusLat * Math.sin(angle);
+        const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
         
-        // Cloud size variation based on type
-        const cloudSize = baseSize * (0.8 + Math.random() * 1.5);
-      
-      // Create a cloud shape using a polygon with extremely smooth, rounded edges
-      const points: [number, number][] = [];
-      const numPoints = 48 + Math.floor(Math.random() * 24); // 48-72 points for extremely smooth, rounded edges
-      
-      // Generate initial radius variations
-      const radiusVariations: number[] = [];
-      for (let k = 0; k < numPoints; k++) {
-        radiusVariations.push(0.4 + Math.random() * 0.6); // Base variation
+        // Create circle polygon for this cloud
+        const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, 32);
+        
+        // Fixed cloud thickness
+        const cloudThickness = 500 + Math.random() * 500; // 500-1000m
+        
+        clouds.push({
+          type: 'Feature',
+          id: `${brushCloud.id}-${i}`,
+          properties: {
+            id: `${brushCloud.id}-${i}`,
+            opacity: cloudOpacityRef.current, // Use ref to get latest value
+            baseAltitude: brushCloud.height,
+            height: cloudThickness
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [cloudPolygon]
+          }
+        });
       }
-      
-      // Apply multiple passes of smoothing for very rounded edges
-      let smoothedRadii = [...radiusVariations];
-      const smoothingPasses = 3; // Multiple passes for extra smoothness
-      
-      for (let pass = 0; pass < smoothingPasses; pass++) {
-        const newSmoothed: number[] = [];
-        for (let k = 0; k < numPoints; k++) {
-          const prev = smoothedRadii[(k - 1 + numPoints) % numPoints];
-          const curr = smoothedRadii[k];
-          const next = smoothedRadii[(k + 1) % numPoints];
-          const prev2 = smoothedRadii[(k - 2 + numPoints) % numPoints];
-          const next2 = smoothedRadii[(k + 2) % numPoints];
-          // Weighted average with more neighbors for smoother curves
-          newSmoothed.push(
-            prev2 * 0.1 + prev * 0.2 + curr * 0.4 + next * 0.2 + next2 * 0.1
-          );
-        }
-        smoothedRadii = newSmoothed;
-      }
-      
-      // Generate points with smooth, rounded edges
-      for (let j = 0; j < numPoints; j++) {
-        const angle = (j / numPoints) * Math.PI * 2;
-        // Use heavily smoothed radius for very rounded appearance
-        const radius = cloudSize * (0.75 + smoothedRadii[j] * 0.5); // Very smooth, rounded shape
-        points.push([
-          offsetLng + Math.cos(angle) * radius,
-          offsetLat + Math.sin(angle) * radius
-        ]);
-      }
-      
-      // Close the polygon
-      points.push(points[0]);
-      
-      // Use cloud type specific properties
-      const baseAltitude = cloudType.baseAltitude + (Math.random() - 0.5) * cloudType.altitudeRange;
-      const cloudHeight = cloudType.height + (Math.random() - 0.5) * cloudType.heightRange;
-      const cloudOpacity = cloudType.opacity + (Math.random() - 0.5) * 0.1; // Slight variation
-      
-      clouds.push({
-        type: 'Feature',
-        id: `cloud-${cloudTypeKey}-${i}`,
-        properties: {
-          id: `cloud-${cloudTypeKey}-${i}`,
-          cloudType: cloudTypeKey,
-          opacity: Math.max(0.1, Math.min(1.0, cloudOpacity)), // Clamp opacity
-          size: cloudSize,
-          baseAltitude: Math.max(0, baseAltitude), // Ensure non-negative
-          height: Math.max(100, cloudHeight), // Minimum 100m thickness
-          color: cloudType.color
-        },
-        geometry: {
-          type: 'Polygon',
-          coordinates: [points]
-        }
-      });
-    }
     });
     
     return {
       type: 'FeatureCollection' as const,
       features: clouds
     };
-  }, [selectedCloudTypes]);
+  }, []); // cloudOpacity accessed via ref, no need for dependency
+
 
   // Add clouds to the map
   const addClouds = useCallback(() => {
@@ -1420,8 +1229,16 @@ const Map: React.FC<MapProps> = ({
           map.current.removeSource('clouds');
         }
         
-        // Use selected cloud area bounds if available, otherwise use default
-        const cloudData = generateClouds(cloudAreaBounds, cloudDensity, cloudSize);
+        // Generate clouds from brush mode
+        if (brushClouds.length === 0) {
+          console.log('No clouds to display');
+          return;
+        }
+        
+        const cloudData = generateCloudsFromBrush(brushClouds, brushSize);
+        
+        console.log('Cloud data generated:', cloudData);
+        console.log('Number of cloud features:', cloudData.features.length);
         
         // Add cloud source
         map.current.addSource('clouds', {
@@ -1437,20 +1254,20 @@ const Map: React.FC<MapProps> = ({
           type: 'fill-extrusion',
           source: 'clouds',
           paint: {
-            'fill-extrusion-color': ['get', 'color'] as any, // Use color from cloud type
-            'fill-extrusion-opacity': ['get', 'opacity'] as any, // Use opacity from cloud type
-            'fill-extrusion-base': ['get', 'baseAltitude'] as any, // Base altitude from properties
-            'fill-extrusion-height': ['get', 'height'] as any, // Height from properties
+            'fill-extrusion-color': cloudColorRef.current, // Use ref to get latest value
+            'fill-extrusion-opacity': cloudOpacityRef.current, // Use ref to get latest value
+            'fill-extrusion-base': ['get', 'baseAltitude'] as any, // Base altitude from properties (1000-3000m)
+            'fill-extrusion-height': ['+', ['get', 'baseAltitude'], ['get', 'height']] as any, // Total height = base + height
             'fill-extrusion-vertical-gradient': true // Enable gradient for more 3D depth effect
           } as any
         }, beforeLayer);
         
-        console.log('Clouds added to map');
+        console.log('Clouds added to map successfully');
       } catch (error) {
         console.error('Error adding clouds:', error);
       }
     }
-  }, [cloudDensity, cloudSize, cloudAreaBounds, selectedCloudTypes, generateClouds]);
+  }, [brushClouds, brushSize, generateCloudsFromBrush]); // cloudOpacity, cloudColor, cloudHeight accessed via refs
 
   // Remove clouds from the map
   const removeClouds = useCallback(() => {
@@ -1574,8 +1391,8 @@ const Map: React.FC<MapProps> = ({
         try {
           map.current.setPaintProperty('sky', 'sky-atmosphere-sun', [newAzimuth, newElevation]);
           
-          // Apply halo color with current opacity
-          const rgb = haloColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 255, 255];
+          // Apply halo color with current opacity (use ref to get latest value)
+          const rgb = haloColorRef.current.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 255, 255];
           const haloColorWithOpacity = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${newHaloOpacity})`;
           map.current.setPaintProperty('sky', 'sky-atmosphere-halo-color', haloColorWithOpacity);
           
@@ -3508,6 +3325,18 @@ const Map: React.FC<MapProps> = ({
     };
   }, [showZoomControls, showCompass, showRotationControls, showPitchControls, showGeolocation, showFullscreen, showScale]);
 
+  // Keep brushCloudsRef in sync with brushClouds state
+  useEffect(() => {
+    brushCloudsRef.current = brushClouds;
+  }, [brushClouds]);
+
+  // Keep cloud parameter refs in sync with state
+  useEffect(() => {
+    cloudHeightRef.current = cloudHeight;
+    cloudOpacityRef.current = cloudOpacity;
+    cloudColorRef.current = cloudColor;
+  }, [cloudHeight, cloudOpacity, cloudColor]);
+
   // Implement Clouds
   useEffect(() => {
     if (!map.current || !map.current.isStyleLoaded()) return;
@@ -3539,7 +3368,7 @@ const Map: React.FC<MapProps> = ({
     }
   }, [cloudColor, cloudOpacity, cloudsEnabled]);
 
-  // Regenerate clouds when density or size changes
+  // Regenerate clouds when height or polygons change
   useEffect(() => {
     if (!map.current || !map.current.isStyleLoaded() || !cloudsEnabled) return;
     
@@ -3549,7 +3378,7 @@ const Map: React.FC<MapProps> = ({
     }, 300);
     
     return () => clearTimeout(timeoutId);
-  }, [cloudDensity, cloudSize, cloudsEnabled, addClouds]);
+  }, [cloudHeight, brushClouds, brushSize, cloudsEnabled, addClouds]);
 
   // Implement Fog (careful not to interfere with sky)
   useEffect(() => {
@@ -3619,9 +3448,9 @@ const Map: React.FC<MapProps> = ({
         const mapWithTerrain = map.current as mapboxgl.Map & { setTerrain?: (terrain: { source: string; exaggeration: number } | null) => void };
         if (mapWithTerrain.setTerrain) {
           mapWithTerrain.setTerrain({ 
-            source: 'mapbox-dem', 
-            exaggeration: terrainExaggeration 
-          });
+          source: 'mapbox-dem', 
+          exaggeration: terrainExaggeration 
+        });
         }
       } else {
         // Remove terrain if disabled
@@ -5833,77 +5662,172 @@ const Map: React.FC<MapProps> = ({
                   </div>
                   {cloudsEnabled && (
                     <>
-                      <div>
-                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '10px', fontWeight: '500' }}>
-                          Cloud Types
-                        </label>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '15px' }}>
-                          {Object.entries(cloudTypes).map(([key, type]) => (
-                            <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
-                              <input
-                                type="checkbox"
-                                checked={selectedCloudTypes.includes(key)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setSelectedCloudTypes([...selectedCloudTypes, key]);
-                                  } else {
-                                    setSelectedCloudTypes(selectedCloudTypes.filter(t => t !== key));
-                                  }
-                                }}
-                                style={{ marginTop: '2px' }}
-                              />
-                              <div style={{ flex: 1 }}>
-                                <label style={{ fontSize: '14px', color: '#333', cursor: 'pointer', fontWeight: '500' }}>
-                                  {type.name}
-                                </label>
-                                <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
-                                  {type.description}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        {selectedCloudTypes.length === 0 && (
-                          <div style={{ 
-                            padding: '8px', 
-                            background: '#fff3cd', 
-                            borderRadius: '4px',
-                            fontSize: '12px',
-                            color: '#856404',
-                            marginBottom: '10px'
-                          }}>
-                            Please select at least one cloud type
-                          </div>
-                        )}
+                      <div style={{ 
+                        padding: '8px', 
+                        background: '#e3f2fd', 
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        color: '#1565c0',
+                        marginBottom: '10px'
+                      }}>
+                        <strong>Brush Mode:</strong> Click the button below to activate. A circle will follow your mouse. Click on the map to create clouds within the circle. More clicks = more clouds.
                       </div>
                       <div>
                         <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
-                          Cloud Density: {cloudDensity}
+                          Brush Size: {brushSize}m
                         </label>
                         <input
                           type="range"
-                          min="1"
-                          max="20"
-                          step="1"
-                          value={cloudDensity}
-                          onChange={(e) => setCloudDensity(Number(e.target.value))}
+                          min="500"
+                          max="20000"
+                          step="100"
+                          value={brushSize}
+                          onChange={(e) => {
+                            const newSize = Number(e.target.value);
+                            setBrushSize(newSize);
+                            // Update preview circle and dots if in brush mode
+                            if (isCloudBrushMode && mousePosition && map.current) {
+                              const circle = createCirclePolygon([mousePosition.lng, mousePosition.lat], newSize);
+                              const source = map.current.getSource('cloud-brush-preview') as mapboxgl.GeoJSONSource;
+                              if (source) {
+                                source.setData({
+                                  type: 'Feature',
+                                  properties: {},
+                                  geometry: {
+                                    type: 'Polygon',
+                                    coordinates: [circle]
+                                  }
+                                });
+                              }
+                              
+                              // Update preview dots with new brush size
+                              const previewClouds: GeoJSON.Feature[] = [];
+                              const brushArea = Math.PI * Math.pow(newSize, 2);
+                              const baseCloudDensity = 0.0001;
+                              const previewCount = Math.min(20, Math.floor(brushArea * baseCloudDensity));
+                              
+                              for (let i = 0; i < previewCount; i++) {
+                                const angle = Math.random() * Math.PI * 2;
+                                const distance = Math.random() * newSize;
+                                const centerLat = mousePosition.lat;
+                                const radiusLat = distance / 111000;
+                                const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+                                const cloudLat = centerLat + radiusLat * Math.sin(angle);
+                                const cloudLng = mousePosition.lng + radiusLng * Math.cos(angle);
+                                
+                                previewClouds.push({
+                                  type: 'Feature',
+                                  properties: {},
+                                  geometry: {
+                                    type: 'Point',
+                                    coordinates: [cloudLng, cloudLat]
+                                  }
+                                });
+                              }
+                              
+                              const pointsSource = map.current.getSource('cloud-brush-preview-points') as mapboxgl.GeoJSONSource;
+                              if (pointsSource) {
+                                pointsSource.setData({
+                                  type: 'FeatureCollection',
+                                  features: previewClouds
+                                });
+                              }
+                            }
+                            // Regenerate all existing clouds with the new brush size
+                            if (cloudsEnabled && brushClouds.length > 0) {
+                              addClouds();
+                            }
+                          }}
+                          style={{ width: '100%' }}
+                        />
+                        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                          Size of the brush circle in meters. Larger = more area for clouds.
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (isCloudBrushMode) {
+                            stopCloudBrushMode();
+                          } else {
+                            startCloudBrushMode();
+                          }
+                        }}
+                        style={{
+                          background: isCloudBrushMode ? '#f44336' : '#4caf50',
+                          color: 'white',
+                          border: 'none',
+                          padding: '10px 16px',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '14px',
+                          width: '100%',
+                          marginTop: '10px',
+                          fontWeight: '500'
+                        }}
+                      >
+                        {isCloudBrushMode ? 'Exit Brush Mode' : 'Start Brush Mode'}
+                      </button>
+                      {brushClouds.length > 0 && (
+                        <button
+                          onClick={() => {
+                            brushCloudsRef.current = [];
+                            setBrushClouds([]);
+                            if (cloudsEnabled) {
+                              addClouds();
+                            }
+                          }}
+                          style={{
+                            background: '#ff9800',
+                            color: 'white',
+                            border: 'none',
+                            padding: '8px 16px',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            width: '100%',
+                            marginTop: '10px'
+                          }}
+                        >
+                          Clear All Brush Clouds ({brushClouds.length})
+                        </button>
+                      )}
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                          Cloud Opacity: {cloudOpacity.toFixed(2)}
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={cloudOpacity}
+                          onChange={(e) => setCloudOpacity(Number(e.target.value))}
                           style={{ width: '100%' }}
                         />
                       </div>
                       <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>Cloud Color</label>
+                        <input
+                          type="color"
+                          value={cloudColor}
+                          onChange={(e) => setCloudColor(e.target.value)}
+                          style={{ width: '100%', height: '40px', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                        />
+                      </div>
+                      <div>
                         <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
-                          Cloud Size (multiplier)
+                          Cloud Altitude (meters)
                         </label>
                         <input
                           type="number"
-                          min="0.1"
-                          max="10"
-                          step="0.1"
-                          value={cloudSize}
+                          min="100"
+                          max="10000"
+                          step="100"
+                          value={cloudHeight}
                           onChange={(e) => {
                             const value = parseFloat(e.target.value);
-                            if (!isNaN(value) && value >= 0.1 && value <= 10) {
-                              setCloudSize(value);
+                            if (!isNaN(value) && value >= 100 && value <= 10000) {
+                              setCloudHeight(value);
                             }
                           }}
                           style={{ 
@@ -5913,82 +5837,16 @@ const Map: React.FC<MapProps> = ({
                             border: '1px solid #ccc', 
                             borderRadius: '4px' 
                           }}
-                          placeholder="0.5"
+                          placeholder="2000"
                         />
                         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                          Recommended: 0.5-2.0 for small areas, 2.0-5.0 for large areas
+                          Altitude/height of clouds in meters above ground. Recommended: 1000-5000m
                         </div>
                       </div>
-                      <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                        <button
-                          onClick={startCloudAreaSelection}
-                          style={{
-                            background: isSelectingCloudArea ? '#f44336' : '#4caf50',
-                            color: 'white',
-                            border: 'none',
-                            padding: '8px 16px',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '14px',
-                            flex: 1
-                          }}
-                        >
-                          {isSelectingCloudArea ? 'Finish Selection (Double-click)' : 'Select Cloud Area'}
-                        </button>
-                        {cloudAreaBounds && (
-                          <button
-                            onClick={clearCloudArea}
-                            style={{
-                              background: '#ff9800',
-                              color: 'white',
-                              border: 'none',
-                              padding: '8px 16px',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                              fontSize: '14px',
-                              flex: 1
-                            }}
-                          >
-                            Clear Area
-                          </button>
-                        )}
-                      </div>
-                      {cloudAreaBounds && (
-                        <div style={{ 
-                          marginTop: '10px', 
-                          padding: '8px', 
-                          background: '#e8f5e9', 
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          color: '#2e7d32'
-                        }}>
-                          Cloud area selected. Clouds will generate within this area.
-                        </div>
-                      )}
-                      <button
-                        onClick={() => {
-                          if (cloudsEnabled) {
-                            addClouds();
-                          }
-                        }}
-                        style={{
-                          background: '#2196f3',
-                          color: 'white',
-                          border: 'none',
-                          padding: '8px 16px',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '14px',
-                          width: '100%',
-                          marginTop: '10px'
-                        }}
-                      >
-                        Regenerate Clouds
-                      </button>
                     </>
                   )}
-                </div>
               </div>
+            </div>
 
               {/* Terrain Controls */}
               <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
