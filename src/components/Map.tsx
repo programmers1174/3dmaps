@@ -114,6 +114,7 @@ const Map: React.FC<MapProps> = ({
     { id: 'buildings', name: '3D Buildings', enabled: true }
   ]);
   const [draw, setDraw] = useState<MapboxDraw | null>(null);
+  const drawRef = useRef<MapboxDraw | null>(null);
   
   // Game area selection state
   const [isSelectingGameArea, setIsSelectingGameArea] = useState(false);
@@ -153,7 +154,7 @@ const Map: React.FC<MapProps> = ({
   const cycleIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Sky layer properties for customization
-  const [skyLayerType] = useState<'atmosphere' | 'gradient'>('atmosphere');
+  const [skyLayerType, setSkyLayerType] = useState<'atmosphere' | 'gradient'>('atmosphere');
   const [skyGradientRadius, setSkyGradientRadius] = useState(90);
   const [sunAzimuth, setSunAzimuth] = useState(200); // 0-360 degrees
   const [sunElevation, setSunElevation] = useState(90); // 60-90 degrees
@@ -243,6 +244,7 @@ const Map: React.FC<MapProps> = ({
   const [cloudSize, setCloudSize] = useState(0.5); // Size multiplier (0.1 to 2.0)
   const [cloudHeight, setCloudHeight] = useState(2000); // Cloud height/thickness in meters
   const [cloudSpeed, setCloudSpeed] = useState(0.1); // Animation speed (0 to 1)
+  const [cloudPolygonDetail, setCloudPolygonDetail] = useState(16); // Number of points per cloud circle (8-32, lower = better performance)
   const cloudAnimationRef = useRef<NodeJS.Timeout | null>(null);
   
   // Cloud brush mode state - new system
@@ -266,6 +268,8 @@ const Map: React.FC<MapProps> = ({
   const cloudHeightRef = useRef(cloudHeight);
   const cloudOpacityRef = useRef(cloudOpacity);
   const cloudColorRef = useRef(cloudColor);
+  const brushSizeRef = useRef(brushSize);
+  const cloudsEnabledRef = useRef(cloudsEnabled);
   const brushModeHandlersRef = useRef<{
     handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
     handleClick?: (e: mapboxgl.MapMouseEvent) => void;
@@ -473,10 +477,12 @@ const Map: React.FC<MapProps> = ({
         map.current.doubleClickZoom.disable();
         map.current.boxZoom.disable();
         
-        // Remove draw control if it exists
-        if (draw && map.current) {
+        // Remove draw control if it exists (use ref to get current value to avoid stale closure)
+        const currentDraw = drawRef.current;
+        if (currentDraw && map.current) {
           try {
-          map.current.removeControl(draw);
+          map.current.removeControl(currentDraw);
+          drawRef.current = null;
           setDraw(null); // Clear the state when removing the control
           } catch (error) {
             console.log('Error removing draw control:', error);
@@ -492,9 +498,9 @@ const Map: React.FC<MapProps> = ({
         map.current.doubleClickZoom.enable();
         map.current.boxZoom.enable();
         
-        // Add draw control back if it doesn't exist
-        // Since we set draw to null when removing it, we can just check if draw is null
-        if (!draw && map.current) {
+        // Add draw control back if it doesn't exist (use ref to get current value to avoid stale closure)
+        const currentDraw = drawRef.current;
+        if (!currentDraw && map.current) {
           try {
           const DrawConstructor = MapboxDraw as unknown as MapboxDrawConstructor;
           const drawInstance = new DrawConstructor({
@@ -506,6 +512,7 @@ const Map: React.FC<MapProps> = ({
             }
           });
           map.current.addControl(drawInstance, 'top-left');
+          drawRef.current = drawInstance;
           setDraw(drawInstance);
           } catch (error) {
             console.log('Error adding draw control:', error);
@@ -513,7 +520,7 @@ const Map: React.FC<MapProps> = ({
         }
       }
     }
-  }, [isSlideshowMode]); // Removed 'draw' from dependencies to prevent logic error
+  }, [isSlideshowMode]); // draw accessed via ref to avoid stale closure and logic errors
 
 
 
@@ -935,8 +942,9 @@ const Map: React.FC<MapProps> = ({
     const handleMouseMove = (e: mapboxgl.MapMouseEvent) => {
       setMousePosition(e.lngLat);
       
-      // Update preview circle
-      const circle = createCirclePolygon([e.lngLat.lng, e.lngLat.lat], brushSize);
+      // Update preview circle (use ref to get current brushSize to avoid stale closure)
+      const currentBrushSize = brushSizeRef.current;
+      const circle = createCirclePolygon([e.lngLat.lng, e.lngLat.lat], currentBrushSize);
       const source = map.current?.getSource('cloud-brush-preview') as mapboxgl.GeoJSONSource;
       if (source) {
         source.setData({
@@ -951,13 +959,13 @@ const Map: React.FC<MapProps> = ({
       
       // Show preview dots for where clouds would appear
       const previewClouds: GeoJSON.Feature[] = [];
-      const brushArea = Math.PI * Math.pow(brushSize, 2);
+      const brushArea = Math.PI * Math.pow(currentBrushSize, 2);
       const baseCloudDensity = 0.0001;
       const previewCount = Math.min(20, Math.floor(brushArea * baseCloudDensity)); // Max 20 preview dots
       
       for (let i = 0; i < previewCount; i++) {
         const angle = Math.random() * Math.PI * 2;
-        const distance = Math.random() * brushSize;
+        const distance = Math.random() * currentBrushSize;
         const centerLat = e.lngLat.lat;
         const radiusLat = distance / 111000;
         const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
@@ -1034,7 +1042,7 @@ const Map: React.FC<MapProps> = ({
         const newCloud = {
           id: `brush-cloud-${Date.now()}-${Math.random()}`,
           center,
-          size: 200, // Fixed cloud size in meters
+          size: 0, // Size will be calculated based on clickCount in generateCloudsFromBrush
           height: cloudHeightRef.current,
           clickCount: 1
         };
@@ -1043,8 +1051,8 @@ const Map: React.FC<MapProps> = ({
         setBrushClouds(updatedClouds);
       }
       
-      // Regenerate clouds
-      if (cloudsEnabled) {
+      // Regenerate clouds (use ref to get current cloudsEnabled to avoid stale closure)
+      if (cloudsEnabledRef.current) {
         addClouds();
       }
     };
@@ -1171,11 +1179,14 @@ const Map: React.FC<MapProps> = ({
       // Calculate number of clouds based on brush size and click count
       // Larger brush = more clouds, more clicks = more clouds
       const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
-      const baseCloudDensity = 0.0001; // Clouds per square meter
+      const baseCloudDensity = 0.000002; // Reduced density: ~6-7 clouds on first click with 1000m brush
       const numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity * brushCloud.clickCount));
       
-      // Fixed cloud size (200m radius)
-      const cloudSize = brushCloud.size;
+      // Cloud size scales with clickCount: starts at 60m, grows by 40m per click
+      // clickCount 1: 60m, 2: 100m, 3: 140m, 4: 180m, 5: 220m, etc.
+      const baseCloudSize = 60; // Starting size in meters
+      const cloudSizeGrowth = 40; // Size increase per click in meters
+      const cloudSize = baseCloudSize + (brushCloud.clickCount - 1) * cloudSizeGrowth;
       
       for (let i = 0; i < numClouds; i++) {
         // Random position within brush circle
@@ -1187,11 +1198,14 @@ const Map: React.FC<MapProps> = ({
         const cloudLat = centerLat + radiusLat * Math.sin(angle);
         const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
         
-        // Create circle polygon for this cloud
-        const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, 32);
+        // Create circle polygon for this cloud (user-controlled detail level)
+        const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, cloudPolygonDetail);
         
-        // Fixed cloud thickness
-        const cloudThickness = 500 + Math.random() * 500; // 500-1000m
+        // Cloud thickness scales with clickCount: starts at 10m, grows per click, max 500m
+        const baseThickness = 10; // Starting thickness in meters
+        const thicknessGrowth = 55; // Thickness increase per click in meters
+        const maxThickness = 500; // Maximum thickness (current max)
+        const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
         
         clouds.push({
           type: 'Feature',
@@ -1214,7 +1228,7 @@ const Map: React.FC<MapProps> = ({
       type: 'FeatureCollection' as const,
       features: clouds
     };
-  }, []); // cloudOpacity accessed via ref, no need for dependency
+  }, [cloudPolygonDetail]); // cloudOpacity accessed via ref
 
 
   // Add clouds to the map
@@ -2397,7 +2411,8 @@ const Map: React.FC<MapProps> = ({
     if (map.current && map.current.isStyleLoaded()) {
       applySkyProperties();
     }
-  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity, applySkyProperties]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]); // applySkyProperties excluded - it depends on the same variables above
 
   // Auto-start sun cycle when enabled by default
   useEffect(() => {
@@ -2434,18 +2449,24 @@ const Map: React.FC<MapProps> = ({
 
 
 
+  // Keep drawRef in sync with draw state
+  useEffect(() => {
+    drawRef.current = draw;
+  }, [draw]);
+
   // Cleanup effect for draw control
   useEffect(() => {
     return () => {
-      if (draw && map.current) {
+      const currentDraw = drawRef.current;
+      if (currentDraw && map.current) {
         try {
-          map.current.removeControl(draw);
+          map.current.removeControl(currentDraw);
         } catch (error) {
           console.log('Error removing draw control during cleanup:', error);
         }
       }
     };
-  }, [draw]);
+  }, []); // draw accessed via ref
 
   // Force remove any existing dark shade overlay on mount
   useEffect(() => {
@@ -3335,7 +3356,9 @@ const Map: React.FC<MapProps> = ({
     cloudHeightRef.current = cloudHeight;
     cloudOpacityRef.current = cloudOpacity;
     cloudColorRef.current = cloudColor;
-  }, [cloudHeight, cloudOpacity, cloudColor]);
+    brushSizeRef.current = brushSize;
+    cloudsEnabledRef.current = cloudsEnabled;
+  }, [cloudHeight, cloudOpacity, cloudColor, brushSize, cloudsEnabled]);
 
   // Implement Clouds
   useEffect(() => {
@@ -3835,10 +3858,9 @@ const Map: React.FC<MapProps> = ({
       mapInstance.addControl(new mapboxgl.NavigationControl());
     }
 
-    // Get default modes from a temporary instance
+    // Get default modes from DrawConstructor (avoid creating temporary instance to prevent memory leak)
     const DrawConstructor = MapboxDraw as unknown as MapboxDrawConstructor;
-    const tempInstance = new DrawConstructor();
-    const defaultModes = DrawConstructor.modes || (tempInstance as unknown as { modes?: MapboxDrawModes }).modes || {};
+    const defaultModes = DrawConstructor.modes || {};
 
     const drawInstance = new DrawConstructor({
       displayControlsDefault: false,
@@ -3851,6 +3873,7 @@ const Map: React.FC<MapProps> = ({
     // Add draw control only in editor mode
     if (!isSlideshowMode) {
       mapInstance.addControl(drawInstance, 'top-left');
+      drawRef.current = drawInstance;
       setDraw(drawInstance);
     }
 
@@ -5841,6 +5864,30 @@ const Map: React.FC<MapProps> = ({
                         />
                         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
                           Altitude/height of clouds in meters above ground. Recommended: 1000-5000m
+                        </div>
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
+                          Cloud Detail: {cloudPolygonDetail} points
+                        </label>
+                        <input
+                          type="range"
+                          min="4"
+                          max="32"
+                          step="2"
+                          value={cloudPolygonDetail}
+                          onChange={(e) => {
+                            const newDetail = Number(e.target.value);
+                            setCloudPolygonDetail(newDetail);
+                            // Regenerate clouds with new detail level
+                            if (cloudsEnabled && brushClouds.length > 0) {
+                              addClouds();
+                            }
+                          }}
+                          style={{ width: '100%' }}
+                        />
+                        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                          Lower = better performance (weaker computers). Higher = smoother circles (stronger computers). Range: 4-32 points.
                         </div>
                       </div>
                     </>
