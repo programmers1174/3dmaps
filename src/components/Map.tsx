@@ -274,6 +274,27 @@ const Map: React.FC<MapProps> = ({
     handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
     handleClick?: (e: mapboxgl.MapMouseEvent) => void;
   }>({});
+  
+  // Performance optimization: Cache generated clouds per brush cloud ID
+  type CloudCacheEntry = {
+    features: GeoJSON.Feature[];
+    brushCloud: { id: string; center: [number, number]; size: number; height: number; clickCount: number };
+    brushSize: number;
+    cloudPolygonDetail: number;
+  };
+  const cloudCacheRef = useRef<globalThis.Map<string, CloudCacheEntry>>(new globalThis.Map());
+  
+  // Track last brushClouds state to detect changes
+  const lastBrushCloudsRef = useRef<Array<{
+    id: string;
+    center: [number, number];
+    size: number;
+    height: number;
+    clickCount: number;
+  }>>([]);
+  
+  // Debounce timer for parameter changes
+  const cloudRegenDebounceRef = useRef<NodeJS.Timeout | null>(null);
 
 
   // Terrain Controls
@@ -1165,61 +1186,103 @@ const Map: React.FC<MapProps> = ({
     }
   }, []); // map.current is a ref
 
-  // Generate clouds from brush mode clicks
+  // Generate clouds for a single brush cloud (for caching and incremental updates)
+  const generateCloudsForBrushCloud = useCallback((
+    brushCloud: { id: string; center: [number, number]; size: number; height: number; clickCount: number },
+    brushSizeMeters: number,
+    detail: number
+  ): GeoJSON.Feature[] => {
+    const clouds: GeoJSON.Feature[] = [];
+    
+    // Calculate number of clouds based on brush size and click count
+    // Larger brush = more clouds, more clicks = more clouds
+    const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
+    const baseCloudDensity = 0.000002; // Reduced density: ~6-7 clouds on first click with 1000m brush
+    const numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity * brushCloud.clickCount));
+    
+    // Cloud size scales with clickCount: starts at 60m, grows by 40m per click
+    // clickCount 1: 60m, 2: 100m, 3: 140m, 4: 180m, 5: 220m, etc.
+    const baseCloudSize = 60; // Starting size in meters
+    const cloudSizeGrowth = 40; // Size increase per click in meters
+    const cloudSize = baseCloudSize + (brushCloud.clickCount - 1) * cloudSizeGrowth;
+    
+    for (let i = 0; i < numClouds; i++) {
+      // Random position within brush circle
+      const angle = Math.random() * Math.PI * 2;
+      const distance = Math.random() * brushSizeMeters;
+      const centerLat = brushCloud.center[1];
+      const radiusLat = distance / 111000;
+      const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+      const cloudLat = centerLat + radiusLat * Math.sin(angle);
+      const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
+      
+      // Create circle polygon for this cloud (user-controlled detail level)
+      const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, detail);
+      
+      // Cloud thickness scales with clickCount: starts at 10m, grows per click, max 500m
+      const baseThickness = 10; // Starting thickness in meters
+      const thicknessGrowth = 55; // Thickness increase per click in meters
+      const maxThickness = 500; // Maximum thickness (current max)
+      const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
+      
+      clouds.push({
+        type: 'Feature',
+        id: `${brushCloud.id}-${i}`,
+        properties: {
+          id: `${brushCloud.id}-${i}`,
+          opacity: cloudOpacityRef.current, // Use ref to get latest value
+          baseAltitude: brushCloud.height,
+          height: cloudThickness
+        },
+        geometry: {
+          type: 'Polygon',
+          coordinates: [cloudPolygon]
+        }
+      });
+    }
+    
+    return clouds;
+  }, []); // cloudOpacity accessed via ref
+
+  // Generate clouds from brush mode clicks (with caching support)
   const generateCloudsFromBrush = useCallback((brushCloudsData: Array<{
     id: string;
     center: [number, number];
     size: number;
     height: number;
     clickCount: number;
-  }>, brushSizeMeters: number) => {
+  }>, brushSizeMeters: number, useCache = true) => {
     const clouds: GeoJSON.Feature[] = [];
+    const currentDetail = cloudPolygonDetail;
     
     brushCloudsData.forEach((brushCloud) => {
-      // Calculate number of clouds based on brush size and click count
-      // Larger brush = more clouds, more clicks = more clouds
-      const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
-      const baseCloudDensity = 0.000002; // Reduced density: ~6-7 clouds on first click with 1000m brush
-      const numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity * brushCloud.clickCount));
+      // Check cache first if enabled
+      if (useCache) {
+        const cacheKey = brushCloud.id;
+        const cached = cloudCacheRef.current.get(cacheKey);
+        
+        // Use cache if brush cloud and parameters haven't changed
+        if (cached && 
+            cached.brushCloud.clickCount === brushCloud.clickCount &&
+            cached.brushSize === brushSizeMeters &&
+            cached.cloudPolygonDetail === currentDetail &&
+            cached.brushCloud.height === brushCloud.height) {
+          clouds.push(...cached.features);
+          return;
+        }
+      }
       
-      // Cloud size scales with clickCount: starts at 60m, grows by 40m per click
-      // clickCount 1: 60m, 2: 100m, 3: 140m, 4: 180m, 5: 220m, etc.
-      const baseCloudSize = 60; // Starting size in meters
-      const cloudSizeGrowth = 40; // Size increase per click in meters
-      const cloudSize = baseCloudSize + (brushCloud.clickCount - 1) * cloudSizeGrowth;
+      // Generate new clouds for this brush cloud
+      const newClouds = generateCloudsForBrushCloud(brushCloud, brushSizeMeters, currentDetail);
+      clouds.push(...newClouds);
       
-      for (let i = 0; i < numClouds; i++) {
-        // Random position within brush circle
-        const angle = Math.random() * Math.PI * 2;
-        const distance = Math.random() * brushSizeMeters;
-        const centerLat = brushCloud.center[1];
-        const radiusLat = distance / 111000;
-        const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
-        const cloudLat = centerLat + radiusLat * Math.sin(angle);
-        const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
-        
-        // Create circle polygon for this cloud (user-controlled detail level)
-        const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, cloudPolygonDetail);
-        
-        // Cloud thickness scales with clickCount: starts at 10m, grows per click, max 500m
-        const baseThickness = 10; // Starting thickness in meters
-        const thicknessGrowth = 55; // Thickness increase per click in meters
-        const maxThickness = 500; // Maximum thickness (current max)
-        const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
-        
-        clouds.push({
-          type: 'Feature',
-          id: `${brushCloud.id}-${i}`,
-          properties: {
-            id: `${brushCloud.id}-${i}`,
-            opacity: cloudOpacityRef.current, // Use ref to get latest value
-            baseAltitude: brushCloud.height,
-            height: cloudThickness
-          },
-          geometry: {
-            type: 'Polygon',
-            coordinates: [cloudPolygon]
-          }
+      // Update cache
+      if (useCache) {
+        cloudCacheRef.current.set(brushCloud.id, {
+          features: newClouds,
+          brushCloud: { ...brushCloud },
+          brushSize: brushSizeMeters,
+          cloudPolygonDetail: currentDetail
         });
       }
     });
@@ -1228,60 +1291,163 @@ const Map: React.FC<MapProps> = ({
       type: 'FeatureCollection' as const,
       features: clouds
     };
-  }, [cloudPolygonDetail]); // cloudOpacity accessed via ref
+  }, [cloudPolygonDetail, generateCloudsForBrushCloud]); // cloudOpacity accessed via ref
 
 
-  // Add clouds to the map
-  const addClouds = useCallback(() => {
+  // Add clouds to the map (optimized with incremental updates and setData)
+  const addClouds = useCallback((forceRegenerate = false) => {
     if (map.current && map.current.isStyleLoaded()) {
       try {
-        // Remove existing clouds first
-        if (map.current.getLayer('clouds')) {
-          map.current.removeLayer('clouds');
-        }
-        if (map.current.getSource('clouds')) {
-          map.current.removeSource('clouds');
-        }
+        const source = map.current.getSource('clouds') as mapboxgl.GeoJSONSource | null;
+        const layer = map.current.getLayer('clouds');
+        const currentBrushSize = brushSizeRef.current;
         
         // Generate clouds from brush mode
         if (brushClouds.length === 0) {
+          // Remove clouds if no brush clouds exist
+          if (layer) {
+            map.current.removeLayer('clouds');
+          }
+          if (source) {
+            map.current.removeSource('clouds');
+          }
+          cloudCacheRef.current.clear();
+          lastBrushCloudsRef.current = [];
           console.log('No clouds to display');
           return;
         }
         
-        const cloudData = generateCloudsFromBrush(brushClouds, brushSize);
+        // Detect new and changed brush clouds for incremental updates
+        const lastBrushClouds = lastBrushCloudsRef.current;
+        const brushCloudsMap = new globalThis.Map<string, typeof brushClouds[0]>(brushClouds.map(bc => [bc.id, bc]));
+        const lastBrushCloudsMap = new globalThis.Map<string, typeof lastBrushClouds[0]>(lastBrushClouds.map(bc => [bc.id, bc]));
         
-        console.log('Cloud data generated:', cloudData);
-        console.log('Number of cloud features:', cloudData.features.length);
+        // Find new brush clouds (not in last state)
+        const newBrushClouds = brushClouds.filter(bc => !lastBrushCloudsMap.has(bc.id));
         
-        // Add cloud source
-        map.current.addSource('clouds', {
-          type: 'geojson',
-          data: cloudData
+        // Find changed brush clouds (exists but parameters changed)
+        const changedBrushClouds = brushClouds.filter(bc => {
+          const last = lastBrushCloudsMap.get(bc.id);
+          if (!last) return false;
+          return last.clickCount !== bc.clickCount || 
+                 last.height !== bc.height ||
+                 Math.abs(lastBrushCloudsMap.get(bc.id)!.size - bc.size) > 0.001;
         });
         
-        // Add 3D cloud layer above buildings but below sky
-        // Try to add before sky layer, or if sky doesn't exist, add at the end
-        const beforeLayer = map.current.getLayer('sky') ? 'sky' : undefined;
-        map.current.addLayer({
-          id: 'clouds',
-          type: 'fill-extrusion',
-          source: 'clouds',
-          paint: {
-            'fill-extrusion-color': cloudColorRef.current, // Use ref to get latest value
-            'fill-extrusion-opacity': cloudOpacityRef.current, // Use ref to get latest value
-            'fill-extrusion-base': ['get', 'baseAltitude'] as any, // Base altitude from properties (1000-3000m)
-            'fill-extrusion-height': ['+', ['get', 'baseAltitude'], ['get', 'height']] as any, // Total height = base + height
-            'fill-extrusion-vertical-gradient': true // Enable gradient for more 3D depth effect
-          } as any
-        }, beforeLayer);
+        // Find removed brush clouds (in last state but not in current)
+        const removedBrushCloudIds = lastBrushClouds
+          .filter(bc => !brushCloudsMap.has(bc.id))
+          .map(bc => bc.id);
         
-        console.log('Clouds added to map successfully');
+        // If source exists, use incremental update
+        if (source && layer && !forceRegenerate) {
+          // Get current data
+          const currentData = source._data as GeoJSON.FeatureCollection;
+          const currentFeatures = currentData?.features || [];
+          
+          // Remove features for deleted brush clouds
+          const featuresToKeep = currentFeatures.filter((feature: GeoJSON.Feature) => {
+            const brushCloudId = feature.id?.toString().split('-')[0];
+            return !removedBrushCloudIds.includes(brushCloudId || '');
+          });
+          
+          // Remove cached entries for deleted brush clouds
+          removedBrushCloudIds.forEach(id => cloudCacheRef.current.delete(id));
+          
+          // Generate new clouds for new brush clouds
+          const newClouds: GeoJSON.Feature[] = [];
+          newBrushClouds.forEach(brushCloud => {
+            const clouds = generateCloudsForBrushCloud(brushCloud, currentBrushSize, cloudPolygonDetail);
+            newClouds.push(...clouds);
+            // Cache the generated clouds
+            cloudCacheRef.current.set(brushCloud.id, {
+              features: clouds,
+              brushCloud: { ...brushCloud },
+              brushSize: currentBrushSize,
+              cloudPolygonDetail: cloudPolygonDetail
+            });
+          });
+          
+          // Regenerate clouds for changed brush clouds
+          const changedClouds: GeoJSON.Feature[] = [];
+          const changedFeatureIds = new Set<string>();
+          changedBrushClouds.forEach(brushCloud => {
+            // Remove old cached features
+            const oldFeatures = cloudCacheRef.current.get(brushCloud.id)?.features || [];
+            oldFeatures.forEach(f => {
+              if (f.id) changedFeatureIds.add(f.id.toString());
+            });
+            
+            // Generate new clouds
+            const clouds = generateCloudsForBrushCloud(brushCloud, currentBrushSize, cloudPolygonDetail);
+            changedClouds.push(...clouds);
+            
+            // Update cache
+            cloudCacheRef.current.set(brushCloud.id, {
+              features: clouds,
+              brushCloud: { ...brushCloud },
+              brushSize: currentBrushSize,
+              cloudPolygonDetail: cloudPolygonDetail
+            });
+          });
+          
+          // Remove old features for changed brush clouds
+          const filteredFeatures = featuresToKeep.filter((feature: GeoJSON.Feature) => {
+            const featureId = feature.id?.toString();
+            return !changedFeatureIds.has(featureId || '');
+          });
+          
+          // Combine all features
+          const allFeatures = [...filteredFeatures, ...newClouds, ...changedClouds];
+          
+          // Update source with setData (much faster than remove/add)
+          source.setData({
+            type: 'FeatureCollection',
+            features: allFeatures
+          });
+          
+          console.log(`Clouds updated incrementally: ${newClouds.length} new, ${changedClouds.length} changed, ${removedBrushCloudIds.length} removed`);
+        } else {
+          // Initial load or force regenerate: generate all clouds
+          const cloudData = generateCloudsFromBrush(brushClouds, currentBrushSize, false); // Don't use cache on full regenerate
+          
+          if (source && layer) {
+            // Source exists, just update data
+            source.setData(cloudData);
+          } else {
+            // Source doesn't exist, create it
+            map.current.addSource('clouds', {
+              type: 'geojson',
+              data: cloudData
+            });
+            
+            // Add 3D cloud layer above buildings but below sky
+            const beforeLayer = map.current.getLayer('sky') ? 'sky' : undefined;
+            map.current.addLayer({
+              id: 'clouds',
+              type: 'fill-extrusion',
+              source: 'clouds',
+              paint: {
+                'fill-extrusion-color': cloudColorRef.current,
+                'fill-extrusion-opacity': cloudOpacityRef.current,
+                'fill-extrusion-base': ['get', 'baseAltitude'] as any,
+                'fill-extrusion-height': ['+', ['get', 'baseAltitude'], ['get', 'height']] as any,
+                'fill-extrusion-vertical-gradient': true
+              } as any
+            }, beforeLayer);
+          }
+          
+          console.log('Clouds generated:', cloudData.features.length, 'features');
+        }
+        
+        // Update last brush clouds state
+        lastBrushCloudsRef.current = brushClouds.map(bc => ({ ...bc }));
+        
       } catch (error) {
         console.error('Error adding clouds:', error);
       }
     }
-  }, [brushClouds, brushSize, generateCloudsFromBrush]); // cloudOpacity, cloudColor, cloudHeight accessed via refs
+  }, [brushClouds, brushSize, generateCloudsFromBrush, generateCloudsForBrushCloud, cloudPolygonDetail]); // cloudOpacity, cloudColor, cloudHeight accessed via refs
 
   // Remove clouds from the map
   const removeClouds = useCallback(() => {
@@ -3401,7 +3567,7 @@ const Map: React.FC<MapProps> = ({
     }, 300);
     
     return () => clearTimeout(timeoutId);
-  }, [cloudHeight, brushClouds, brushSize, cloudsEnabled, addClouds]);
+  }, [cloudHeight, brushClouds, brushSize, cloudsEnabled, addClouds]); // Note: addClouds handles debouncing internally for parameter changes
 
   // Implement Fog (careful not to interfere with sky)
   useEffect(() => {
@@ -5756,9 +5922,16 @@ const Map: React.FC<MapProps> = ({
                                 });
                               }
                             }
-                            // Regenerate all existing clouds with the new brush size
+                            // Regenerate all existing clouds with the new brush size (debounced)
                             if (cloudsEnabled && brushClouds.length > 0) {
-                              addClouds();
+                              // Clear existing debounce timer
+                              if (cloudRegenDebounceRef.current) {
+                                clearTimeout(cloudRegenDebounceRef.current);
+                              }
+                              // Debounce regeneration by 300ms
+                              cloudRegenDebounceRef.current = setTimeout(() => {
+                                addClouds(true); // Force regenerate when brush size changes
+                              }, 300);
                             }
                           }}
                           style={{ width: '100%' }}
@@ -5879,9 +6052,16 @@ const Map: React.FC<MapProps> = ({
                           onChange={(e) => {
                             const newDetail = Number(e.target.value);
                             setCloudPolygonDetail(newDetail);
-                            // Regenerate clouds with new detail level
+                            // Regenerate clouds with new detail level (debounced)
                             if (cloudsEnabled && brushClouds.length > 0) {
-                              addClouds();
+                              // Clear existing debounce timer
+                              if (cloudRegenDebounceRef.current) {
+                                clearTimeout(cloudRegenDebounceRef.current);
+                              }
+                              // Debounce regeneration by 300ms
+                              cloudRegenDebounceRef.current = setTimeout(() => {
+                                addClouds(true); // Force regenerate when detail changes
+                              }, 300);
                             }
                           }}
                           style={{ width: '100%' }}
