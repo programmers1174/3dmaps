@@ -191,7 +191,7 @@ const Map: React.FC<MapProps> = ({
   }, [sunAzimuth, sunElevation, sunIntensity, haloColor, atmosphereColor, backgroundColor]);
 
 
-
+ 
 
   // Replace showTopBar with showSidePanel
   const [showSidePanel, setShowSidePanel] = useState(true);
@@ -272,8 +272,13 @@ const Map: React.FC<MapProps> = ({
   const cloudsEnabledRef = useRef(cloudsEnabled);
   const brushModeHandlersRef = useRef<{
     handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
-    handleClick?: (e: mapboxgl.MapMouseEvent) => void;
+    handleMouseDown?: (e: mapboxgl.MapMouseEvent) => void;
+    handleMouseUp?: (e: mapboxgl.MapMouseEvent) => void;
+    handleMouseLeave?: () => void;
   }>({});
+  const cloudBrushIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isMouseDownRef = useRef(false);
+  const currentBrushPositionRef = useRef<[number, number] | null>(null);
   
   // Performance optimization: Cache generated clouds per brush cloud ID
   type CloudCacheEntry = {
@@ -281,8 +286,19 @@ const Map: React.FC<MapProps> = ({
     brushCloud: { id: string; center: [number, number]; size: number; height: number; clickCount: number };
     brushSize: number;
     cloudPolygonDetail: number;
+    cloudPositions: Array<{ lng: number; lat: number }>; // Store fixed positions
+    numClouds: number; // Store fixed number of clouds
   };
   const cloudCacheRef = useRef<globalThis.Map<string, CloudCacheEntry>>(new globalThis.Map());
+  
+  // Seeded random number generator for fixed positions
+  const seededRandom = (seed: number) => {
+    let value = seed;
+    return () => {
+      value = (value * 9301 + 49297) % 233280;
+      return value / 233280;
+    };
+  };
   
   // Track last brushClouds state to detect changes
   const lastBrushCloudsRef = useRef<Array<{
@@ -1036,10 +1052,8 @@ const Map: React.FC<MapProps> = ({
       }
     };
     
-    // Click handler to create clouds
-    const handleClick = (e: mapboxgl.MapMouseEvent) => {
-      const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-      
+    // Function to increment cloud at a specific position
+    const incrementCloudAtPosition = (center: [number, number]) => {
       // Use ref to get current brushClouds to avoid stale closure
       const currentClouds = brushCloudsRef.current;
       
@@ -1078,10 +1092,60 @@ const Map: React.FC<MapProps> = ({
       }
     };
     
-    brushModeHandlersRef.current = { handleMouseMove, handleClick };
+    // Mouse down handler to start continuous cloud creation
+    const handleMouseDown = (e: mapboxgl.MapMouseEvent) => {
+      const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      currentBrushPositionRef.current = center;
+      isMouseDownRef.current = true;
+      
+      // Create initial cloud
+      incrementCloudAtPosition(center);
+      
+      // Start interval to continuously increment clouds while mouse is held down
+      cloudBrushIntervalRef.current = setInterval(() => {
+        if (isMouseDownRef.current && currentBrushPositionRef.current) {
+          incrementCloudAtPosition(currentBrushPositionRef.current);
+        }
+      }, 100); // Update every 100ms for smooth growth
+    };
     
-    map.current.on('mousemove', handleMouseMove);
-    map.current.on('click', handleClick);
+    // Mouse up handler to stop continuous cloud creation
+    const handleMouseUp = () => {
+      isMouseDownRef.current = false;
+      currentBrushPositionRef.current = null;
+      
+      // Clear interval
+      if (cloudBrushIntervalRef.current) {
+        clearInterval(cloudBrushIntervalRef.current);
+        cloudBrushIntervalRef.current = null;
+      }
+    };
+    
+    // Mouse leave handler to stop cloud creation if mouse leaves map
+    const handleMouseLeave = () => {
+      handleMouseUp();
+    };
+    
+    // Update mouse move to also create clouds while dragging
+    const handleMouseMoveWithBrush = (e: mapboxgl.MapMouseEvent) => {
+      // Call original mouse move handler for preview
+      handleMouseMove(e);
+      
+      // If mouse is down, update position and create clouds while dragging
+      if (isMouseDownRef.current) {
+        const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+        currentBrushPositionRef.current = center;
+        // Create cloud at new position (will increment if already exists)
+        incrementCloudAtPosition(center);
+      }
+    };
+    
+    brushModeHandlersRef.current = { handleMouseMove: handleMouseMoveWithBrush, handleMouseDown, handleMouseUp, handleMouseLeave };
+    
+    map.current.on('mousemove', handleMouseMoveWithBrush);
+    map.current.on('mousedown', handleMouseDown);
+    map.current.on('mouseup', handleMouseUp);
+    map.current.on('mouseleave', handleMouseLeave);
     
     // Change cursor
     if (map.current.getCanvas()) {
@@ -1096,12 +1160,26 @@ const Map: React.FC<MapProps> = ({
     setIsCloudBrushMode(false);
     setMousePosition(null);
     
+    // Stop any ongoing brush interval
+    if (cloudBrushIntervalRef.current) {
+      clearInterval(cloudBrushIntervalRef.current);
+      cloudBrushIntervalRef.current = null;
+    }
+    isMouseDownRef.current = false;
+    currentBrushPositionRef.current = null;
+    
     // Remove event listeners
     if (brushModeHandlersRef.current.handleMouseMove) {
       map.current.off('mousemove', brushModeHandlersRef.current.handleMouseMove);
     }
-    if (brushModeHandlersRef.current.handleClick) {
-      map.current.off('click', brushModeHandlersRef.current.handleClick);
+    if (brushModeHandlersRef.current.handleMouseDown) {
+      map.current.off('mousedown', brushModeHandlersRef.current.handleMouseDown);
+    }
+    if (brushModeHandlersRef.current.handleMouseUp) {
+      map.current.off('mouseup', brushModeHandlersRef.current.handleMouseUp);
+    }
+    if (brushModeHandlersRef.current.handleMouseLeave) {
+      map.current.off('mouseleave', brushModeHandlersRef.current.handleMouseLeave);
     }
     
     brushModeHandlersRef.current = {};
@@ -1187,6 +1265,7 @@ const Map: React.FC<MapProps> = ({
   }, []); // map.current is a ref
 
   // Generate clouds for a single brush cloud (for caching and incremental updates)
+  // Positions are FIXED on first click - only size changes on subsequent clicks
   const generateCloudsForBrushCloud = useCallback((
     brushCloud: { id: string; center: [number, number]; size: number; height: number; clickCount: number },
     brushSizeMeters: number,
@@ -1194,11 +1273,54 @@ const Map: React.FC<MapProps> = ({
   ): GeoJSON.Feature[] => {
     const clouds: GeoJSON.Feature[] = [];
     
-    // Calculate number of clouds based on brush size and click count
-    // Larger brush = more clouds, more clicks = more clouds
-    const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
-    const baseCloudDensity = 0.000002; // Reduced density: ~6-7 clouds on first click with 1000m brush
-    const numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity * brushCloud.clickCount));
+    // Check if we have cached positions (from first click)
+    const cached = cloudCacheRef.current.get(brushCloud.id);
+    let cloudPositions: Array<{ lng: number; lat: number }>;
+    let numClouds: number;
+    
+    if (cached && cached.cloudPositions && cached.numClouds && cached.cloudPositions.length > 0) {
+      // Use cached positions (fixed positions from first click)
+      cloudPositions = cached.cloudPositions;
+      numClouds = cached.numClouds;
+    } else {
+      // First click: generate fixed positions based on brush size only (not clickCount)
+      const brushArea = Math.PI * Math.pow(brushSizeMeters, 2); // Area in square meters
+      const baseCloudDensity = 0.000002; // Reduced density: ~6-7 clouds on first click with 1000m brush
+      numClouds = Math.max(1, Math.floor(brushArea * baseCloudDensity)); // Fixed number based on area only
+      
+      // Use seeded random based on brushCloud.id to ensure fixed positions
+      const seed = brushCloud.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+      const random = seededRandom(seed);
+      cloudPositions = [];
+      
+      const centerLat = brushCloud.center[1];
+      for (let i = 0; i < numClouds; i++) {
+        // Generate fixed positions using seeded random
+        const angle = random() * Math.PI * 2;
+        const distance = random() * brushSizeMeters;
+        const radiusLat = distance / 111000;
+        const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+        const cloudLat = centerLat + radiusLat * Math.sin(angle);
+        const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
+        cloudPositions.push({ lng: cloudLng, lat: cloudLat });
+      }
+      
+      // Store positions and numClouds in cache immediately
+      const existingCache = cloudCacheRef.current.get(brushCloud.id);
+      if (existingCache) {
+        existingCache.cloudPositions = cloudPositions;
+        existingCache.numClouds = numClouds;
+      } else {
+        cloudCacheRef.current.set(brushCloud.id, {
+          features: [],
+          brushCloud: { ...brushCloud },
+          brushSize: brushSizeMeters,
+          cloudPolygonDetail: detail,
+          cloudPositions: cloudPositions,
+          numClouds: numClouds
+        });
+      }
+    }
     
     // Cloud size scales with clickCount: starts at 60m, grows by 40m per click
     // clickCount 1: 60m, 2: 100m, 3: 140m, 4: 180m, 5: 220m, etc.
@@ -1206,24 +1328,18 @@ const Map: React.FC<MapProps> = ({
     const cloudSizeGrowth = 40; // Size increase per click in meters
     const cloudSize = baseCloudSize + (brushCloud.clickCount - 1) * cloudSizeGrowth;
     
+    // Cloud thickness scales with clickCount: starts at 10m, grows per click, max 500m
+    const baseThickness = 10; // Starting thickness in meters
+    const thicknessGrowth = 55; // Thickness increase per click in meters
+    const maxThickness = 500; // Maximum thickness (current max)
+    const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
+    
+    // Generate clouds at fixed positions with updated sizes
     for (let i = 0; i < numClouds; i++) {
-      // Random position within brush circle
-      const angle = Math.random() * Math.PI * 2;
-      const distance = Math.random() * brushSizeMeters;
-      const centerLat = brushCloud.center[1];
-      const radiusLat = distance / 111000;
-      const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
-      const cloudLat = centerLat + radiusLat * Math.sin(angle);
-      const cloudLng = brushCloud.center[0] + radiusLng * Math.cos(angle);
+      const position = cloudPositions[i];
       
       // Create circle polygon for this cloud (user-controlled detail level)
-      const cloudPolygon = createCirclePolygon([cloudLng, cloudLat], cloudSize, detail);
-      
-      // Cloud thickness scales with clickCount: starts at 10m, grows per click, max 500m
-      const baseThickness = 10; // Starting thickness in meters
-      const thicknessGrowth = 55; // Thickness increase per click in meters
-      const maxThickness = 500; // Maximum thickness (current max)
-      const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
+      const cloudPolygon = createCirclePolygon([position.lng, position.lat], cloudSize, detail);
       
       clouds.push({
         type: 'Feature',
@@ -1256,12 +1372,14 @@ const Map: React.FC<MapProps> = ({
     const currentDetail = cloudPolygonDetail;
     
     brushCloudsData.forEach((brushCloud) => {
-      // Check cache first if enabled
+      // Check cache first if enabled - but don't use cached features if clickCount changed
+      // (we need to regenerate with new sizes but same positions)
       if (useCache) {
         const cacheKey = brushCloud.id;
         const cached = cloudCacheRef.current.get(cacheKey);
         
-        // Use cache if brush cloud and parameters haven't changed
+        // Only use cached features if clickCount hasn't changed (positions are the same)
+        // If clickCount changed, we still regenerate to update sizes but use cached positions
         if (cached && 
             cached.brushCloud.clickCount === brushCloud.clickCount &&
             cached.brushSize === brushSizeMeters &&
@@ -1272,9 +1390,12 @@ const Map: React.FC<MapProps> = ({
         }
       }
       
-      // Generate new clouds for this brush cloud
+      // Generate new clouds for this brush cloud (will use cached positions if available)
       const newClouds = generateCloudsForBrushCloud(brushCloud, brushSizeMeters, currentDetail);
       clouds.push(...newClouds);
+      
+      // Get positions and numClouds from cache (they were stored during generation)
+      const cached = cloudCacheRef.current.get(brushCloud.id);
       
       // Update cache
       if (useCache) {
@@ -1282,7 +1403,9 @@ const Map: React.FC<MapProps> = ({
           features: newClouds,
           brushCloud: { ...brushCloud },
           brushSize: brushSizeMeters,
-          cloudPolygonDetail: currentDetail
+          cloudPolygonDetail: currentDetail,
+          cloudPositions: cached?.cloudPositions || [],
+          numClouds: cached?.numClouds || newClouds.length
         });
       }
     });
@@ -1359,12 +1482,15 @@ const Map: React.FC<MapProps> = ({
           newBrushClouds.forEach(brushCloud => {
             const clouds = generateCloudsForBrushCloud(brushCloud, currentBrushSize, cloudPolygonDetail);
             newClouds.push(...clouds);
-            // Cache the generated clouds
+            // Cache the generated clouds (positions already stored during generation)
+            const existingCache = cloudCacheRef.current.get(brushCloud.id);
             cloudCacheRef.current.set(brushCloud.id, {
               features: clouds,
               brushCloud: { ...brushCloud },
               brushSize: currentBrushSize,
-              cloudPolygonDetail: cloudPolygonDetail
+              cloudPolygonDetail: cloudPolygonDetail,
+              cloudPositions: existingCache?.cloudPositions || [],
+              numClouds: existingCache?.numClouds || clouds.length
             });
           });
           
@@ -1382,12 +1508,15 @@ const Map: React.FC<MapProps> = ({
             const clouds = generateCloudsForBrushCloud(brushCloud, currentBrushSize, cloudPolygonDetail);
             changedClouds.push(...clouds);
             
-            // Update cache
+            // Update cache (positions already stored during generation)
+            const existingCache = cloudCacheRef.current.get(brushCloud.id);
             cloudCacheRef.current.set(brushCloud.id, {
               features: clouds,
               brushCloud: { ...brushCloud },
               brushSize: currentBrushSize,
-              cloudPolygonDetail: cloudPolygonDetail
+              cloudPolygonDetail: cloudPolygonDetail,
+              cloudPositions: existingCache?.cloudPositions || [],
+              numClouds: existingCache?.numClouds || clouds.length
             });
           });
           
@@ -2578,7 +2707,7 @@ const Map: React.FC<MapProps> = ({
       applySkyProperties();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]); // applySkyProperties excluded - it depends on the same variables above
+  }, [skyLayerType, skyGradientRadius, sunAzimuth, sunElevation, sunIntensity, sunColor, haloColor, haloOpacity, atmosphereColor, backgroundColor, backgroundOpacity]); // applySkyProperties excluded - it depends on the same variables above
 
   // Auto-start sun cycle when enabled by default
   useEffect(() => {
@@ -5868,7 +5997,7 @@ const Map: React.FC<MapProps> = ({
                         <input
                           type="range"
                           min="500"
-                          max="20000"
+                          max="50000"
                           step="100"
                           value={brushSize}
                           onChange={(e) => {
@@ -6045,9 +6174,9 @@ const Map: React.FC<MapProps> = ({
                         </label>
                         <input
                           type="range"
-                          min="4"
+                          min="3"
                           max="32"
-                          step="2"
+                          step="1"
                           value={cloudPolygonDetail}
                           onChange={(e) => {
                             const newDetail = Number(e.target.value);
@@ -6067,7 +6196,7 @@ const Map: React.FC<MapProps> = ({
                           style={{ width: '100%' }}
                         />
                         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                          Lower = better performance (weaker computers). Higher = smoother circles (stronger computers). Range: 4-32 points.
+                          Lower = better performance (weaker computers). Higher = smoother circles (stronger computers). Range: 3-32 points.
                         </div>
                       </div>
                     </>
