@@ -158,11 +158,11 @@ const Map: React.FC<MapProps> = ({
   const [skyGradientRadius, setSkyGradientRadius] = useState(90);
   const [sunAzimuth, setSunAzimuth] = useState(200); // 0-360 degrees
   const [sunElevation, setSunElevation] = useState(90); // 60-90 degrees
-  const [sunIntensity, setSunIntensity] = useState(1.0);
+  const [sunIntensity, setSunIntensity] = useState(5); // Higher default for bright afternoon (1–15)
   const [sunColor, setSunColor] = useState('#ffffff');
-  const [haloColor, setHaloColor] = useState('#ffffff');
-  const [haloOpacity, setHaloOpacity] = useState(1.0);
-  const [atmosphereColor, setAtmosphereColor] = useState('#5FB3FF'); // Bright blue for visible Earth atmosphere
+  const [haloColor, setHaloColor] = useState('#FFFBF0'); // Warm white – soft, natural sun glow (not harsh circle)
+  const [haloOpacity, setHaloOpacity] = useState(0.55); // Softer halo that blends into sky (not a hard ring)
+  const [atmosphereColor, setAtmosphereColor] = useState('#385bad');
   const [backgroundColor, setBackgroundColor] = useState('#00b3ff'); // Default blue background
   const [backgroundOpacity, setBackgroundOpacity] = useState(1);
   
@@ -177,6 +177,7 @@ const Map: React.FC<MapProps> = ({
   const sunElevationRef = useRef(sunElevation);
   const sunIntensityRef = useRef(sunIntensity);
   const haloColorRef = useRef(haloColor);
+  const haloOpacityRef = useRef(haloOpacity);
   const atmosphereColorRef = useRef(atmosphereColor);
   const backgroundColorRef = useRef(backgroundColor);
   
@@ -186,9 +187,10 @@ const Map: React.FC<MapProps> = ({
     sunElevationRef.current = sunElevation;
     sunIntensityRef.current = sunIntensity;
     haloColorRef.current = haloColor;
+    haloOpacityRef.current = haloOpacity;
     atmosphereColorRef.current = atmosphereColor;
     backgroundColorRef.current = backgroundColor;
-  }, [sunAzimuth, sunElevation, sunIntensity, haloColor, atmosphereColor, backgroundColor]);
+  }, [sunAzimuth, sunElevation, sunIntensity, haloColor, haloOpacity, atmosphereColor, backgroundColor]);
 
 
  
@@ -249,7 +251,8 @@ const Map: React.FC<MapProps> = ({
   
   // Cloud brush mode state - new system
   const [isCloudBrushMode, setIsCloudBrushMode] = useState(false);
-  const [brushSize, setBrushSize] = useState(1000); // Brush size in meters
+  const [brushSize, setBrushSize] = useState(1000); // Brush size in meters (diameter)
+  const [brushIntensity, setBrushIntensity] = useState(0.026); // How fast clouds grow when holding (0.001–0.1)
   const [mousePosition, setMousePosition] = useState<mapboxgl.LngLat | null>(null);
   const [brushClouds, setBrushClouds] = useState<Array<{
     id: string;
@@ -269,6 +272,8 @@ const Map: React.FC<MapProps> = ({
   const cloudOpacityRef = useRef(cloudOpacity);
   const cloudColorRef = useRef(cloudColor);
   const brushSizeRef = useRef(brushSize);
+  const brushIntensityRef = useRef(brushIntensity);
+  const brushIntensityAccumulatorRef = useRef(0);
   const cloudsEnabledRef = useRef(cloudsEnabled);
   const brushModeHandlersRef = useRef<{
     handleMouseMove?: (e: mapboxgl.MapMouseEvent) => void;
@@ -277,7 +282,9 @@ const Map: React.FC<MapProps> = ({
     handleMouseLeave?: () => void;
   }>({});
   const cloudBrushIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const cloudBrushHoldTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isMouseDownRef = useRef(false);
+  const brushActiveRef = useRef(false); // true only after hold delay (avoids double-click / zoom)
   const currentBrushPositionRef = useRef<[number, number] | null>(null);
   
   // Performance optimization: Cache generated clouds per brush cloud ID
@@ -933,6 +940,37 @@ const Map: React.FC<MapProps> = ({
     return points;
   };
 
+  // Organic cloud blob: radius varies smoothly by angle (deterministic from seed) for a natural, puffy shape
+  const createCloudBlobPolygon = (
+    center: [number, number],
+    radiusMeters: number,
+    numPoints: number,
+    seed: number
+  ): [number, number][] => {
+    const points: [number, number][] = [];
+    const centerLat = center[1];
+    const radiusLat = radiusMeters / 111000;
+    const radiusLng = radiusMeters / (111000 * Math.cos(centerLat * Math.PI / 180));
+    const s1 = seed * 0.1;
+    const s2 = seed * 0.17;
+    const s3 = seed * 0.23;
+    for (let i = 0; i < numPoints; i++) {
+      const angle = (i / numPoints) * Math.PI * 2;
+      // Smooth, billowy variation: combine several waves so outline is irregular but soft
+      const n = 0.72 + 0.28 * (
+        Math.sin(angle * 2 + s1) * 0.5 +
+        Math.sin(angle * 4 + s2) * 0.3 +
+        Math.sin(angle * 7 + s3) * 0.2
+      );
+      const r = Math.max(0.4, n);
+      const lat = centerLat + radiusLat * r * Math.sin(angle);
+      const lng = center[0] + radiusLng * r * Math.cos(angle);
+      points.push([lng, lat]);
+    }
+    points.push(points[0]);
+    return points;
+  };
+
   // Start cloud brush mode
   const startCloudBrushMode = () => {
     if (!map.current) return;
@@ -1092,29 +1130,49 @@ const Map: React.FC<MapProps> = ({
       }
     };
     
-    // Mouse down handler to start continuous cloud creation
+    // Mouse down handler: only start cloud creation after a short hold (avoids double-click zoom)
+    const HOLD_DELAY_MS = 200;
     const handleMouseDown = (e: mapboxgl.MapMouseEvent) => {
       const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
       currentBrushPositionRef.current = center;
       isMouseDownRef.current = true;
+      brushActiveRef.current = false;
       
-      // Create initial cloud
-      incrementCloudAtPosition(center);
+      // Clear any previous hold timeout (e.g. from previous press)
+      if (cloudBrushHoldTimeoutRef.current) {
+        clearTimeout(cloudBrushHoldTimeoutRef.current);
+        cloudBrushHoldTimeoutRef.current = null;
+      }
       
-      // Start interval to continuously increment clouds while mouse is held down
-      cloudBrushIntervalRef.current = setInterval(() => {
-        if (isMouseDownRef.current && currentBrushPositionRef.current) {
-          incrementCloudAtPosition(currentBrushPositionRef.current);
-        }
-      }, 100); // Update every 100ms for smooth growth
+      // Only start creating clouds after holding for HOLD_DELAY_MS (double-click zoom won't trigger)
+      cloudBrushHoldTimeoutRef.current = setTimeout(() => {
+        cloudBrushHoldTimeoutRef.current = null;
+        if (!isMouseDownRef.current || !currentBrushPositionRef.current) return;
+        brushActiveRef.current = true;
+        brushIntensityAccumulatorRef.current = 0;
+        incrementCloudAtPosition(currentBrushPositionRef.current);
+        cloudBrushIntervalRef.current = setInterval(() => {
+          if (!isMouseDownRef.current || !currentBrushPositionRef.current) return;
+          const intensity = brushIntensityRef.current;
+          brushIntensityAccumulatorRef.current += intensity;
+          while (brushIntensityAccumulatorRef.current >= 1) {
+            brushIntensityAccumulatorRef.current -= 1;
+            incrementCloudAtPosition(currentBrushPositionRef.current);
+          }
+        }, 100);
+      }, HOLD_DELAY_MS);
     };
     
     // Mouse up handler to stop continuous cloud creation
     const handleMouseUp = () => {
+      if (cloudBrushHoldTimeoutRef.current) {
+        clearTimeout(cloudBrushHoldTimeoutRef.current);
+        cloudBrushHoldTimeoutRef.current = null;
+      }
+      brushActiveRef.current = false;
       isMouseDownRef.current = false;
       currentBrushPositionRef.current = null;
       
-      // Clear interval
       if (cloudBrushIntervalRef.current) {
         clearInterval(cloudBrushIntervalRef.current);
         cloudBrushIntervalRef.current = null;
@@ -1131,12 +1189,13 @@ const Map: React.FC<MapProps> = ({
       // Call original mouse move handler for preview
       handleMouseMove(e);
       
-      // If mouse is down, update position and create clouds while dragging
-      if (isMouseDownRef.current) {
+      // If brush is active (held past delay), update position and create clouds while dragging
+      if (brushActiveRef.current) {
         const center: [number, number] = [e.lngLat.lng, e.lngLat.lat];
         currentBrushPositionRef.current = center;
-        // Create cloud at new position (will increment if already exists)
         incrementCloudAtPosition(center);
+      } else if (isMouseDownRef.current) {
+        currentBrushPositionRef.current = [e.lngLat.lng, e.lngLat.lat];
       }
     };
     
@@ -1160,11 +1219,15 @@ const Map: React.FC<MapProps> = ({
     setIsCloudBrushMode(false);
     setMousePosition(null);
     
-    // Stop any ongoing brush interval
+    if (cloudBrushHoldTimeoutRef.current) {
+      clearTimeout(cloudBrushHoldTimeoutRef.current);
+      cloudBrushHoldTimeoutRef.current = null;
+    }
     if (cloudBrushIntervalRef.current) {
       clearInterval(cloudBrushIntervalRef.current);
       cloudBrushIntervalRef.current = null;
     }
+    brushActiveRef.current = false;
     isMouseDownRef.current = false;
     currentBrushPositionRef.current = null;
     
@@ -1334,25 +1397,48 @@ const Map: React.FC<MapProps> = ({
     const maxThickness = 500; // Maximum thickness (current max)
     const cloudThickness = Math.min(baseThickness + (brushCloud.clickCount - 1) * thicknessGrowth, maxThickness);
     
-    // Generate clouds at fixed positions with updated sizes
+    // Generate clouds at fixed positions with updated sizes (organic blob + optional second puff)
+    const centerLat = brushCloud.center[1];
     for (let i = 0; i < numClouds; i++) {
       const position = cloudPositions[i];
-      
-      // Create circle polygon for this cloud (user-controlled detail level)
-      const cloudPolygon = createCirclePolygon([position.lng, position.lat], cloudSize, detail);
-      
+      const seed = brushCloud.id.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0) + i * 31;
+      const rand = seededRandom(seed);
+      // Main organic blob
+      const cloudPolygon = createCloudBlobPolygon([position.lng, position.lat], cloudSize, detail, seed);
       clouds.push({
         type: 'Feature',
         id: `${brushCloud.id}-${i}`,
         properties: {
           id: `${brushCloud.id}-${i}`,
-          opacity: cloudOpacityRef.current, // Use ref to get latest value
+          opacity: cloudOpacityRef.current,
           baseAltitude: brushCloud.height,
           height: cloudThickness
         },
         geometry: {
           type: 'Polygon',
           coordinates: [cloudPolygon]
+        }
+      });
+      // Second smaller blob offset for a more natural, billowy look
+      const offsetDist = cloudSize * (0.25 + 0.2 * rand());
+      const offsetAngle = rand() * Math.PI * 2;
+      const radiusLat = offsetDist / 111000;
+      const radiusLng = offsetDist / (111000 * Math.cos(centerLat * Math.PI / 180));
+      const puffLng = position.lng + radiusLng * Math.cos(offsetAngle);
+      const puffLat = position.lat + radiusLat * Math.sin(offsetAngle);
+      const puffPolygon = createCloudBlobPolygon([puffLng, puffLat], cloudSize * 0.6, detail, seed + 1);
+      clouds.push({
+        type: 'Feature',
+        id: `${brushCloud.id}-${i}-puff`,
+        properties: {
+          id: `${brushCloud.id}-${i}-puff`,
+          opacity: cloudOpacityRef.current,
+          baseAltitude: brushCloud.height,
+          height: cloudThickness * 0.85
+        },
+        geometry: {
+          type: 'Polygon',
+          coordinates: [puffPolygon]
         }
       });
     }
@@ -1731,9 +1817,10 @@ const Map: React.FC<MapProps> = ({
         
         // Apply sun properties with enhanced intensity for visible atmosphere
         map.current.setPaintProperty('sky', 'sky-atmosphere-sun', [sunAzimuth, sunElevation]);
-        // Increase intensity to make atmosphere more visible, especially when zoomed out
+        // Use higher intensity floor so atmosphere stays bright and cheerful (not gloomy)
         const currentZoom = map.current.getZoom();
-        const enhancedIntensity = currentZoom < 5 ? Math.max(sunIntensity * 1.5, 2.0) : Math.max(sunIntensity, 1.5);
+        const minBrightIntensity = 4; // Keep sky clearly daytime even at low slider
+        const enhancedIntensity = currentZoom < 5 ? Math.max(sunIntensity * 1.5, minBrightIntensity) : Math.max(sunIntensity, minBrightIntensity);
         map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', enhancedIntensity);
         
         // Apply halo color with current opacity
@@ -2330,7 +2417,9 @@ const Map: React.FC<MapProps> = ({
       const shouldForceSpaceView = currentZoom < 9;
       
       if (shouldForceSpaceView || skyLayerType === 'atmosphere') {
-        // Use atmosphere sky type
+        // Use atmosphere sky type – halo with opacity for soft, natural sun glow
+        const haloRgb = haloColorRef.current.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 251, 240];
+        const haloColorRgba = `rgba(${haloRgb[0]}, ${haloRgb[1]}, ${haloRgb[2]}, ${haloOpacityRef.current})`;
         currentMap.addLayer({
           'id': 'sky',
           'type': 'sky',
@@ -2338,7 +2427,7 @@ const Map: React.FC<MapProps> = ({
             'sky-type': 'atmosphere',
             'sky-atmosphere-sun': [sunAzimuthRef.current, sunElevationRef.current],
             'sky-atmosphere-sun-intensity': sunIntensityRef.current,
-            'sky-atmosphere-halo-color': haloColorRef.current,
+            'sky-atmosphere-halo-color': haloColorRgba,
             'sky-atmosphere-color': atmosphereColorRef.current,
             'sky-opacity': 1.0
           } as any
@@ -3652,8 +3741,9 @@ const Map: React.FC<MapProps> = ({
     cloudOpacityRef.current = cloudOpacity;
     cloudColorRef.current = cloudColor;
     brushSizeRef.current = brushSize;
+    brushIntensityRef.current = brushIntensity;
     cloudsEnabledRef.current = cloudsEnabled;
-  }, [cloudHeight, cloudOpacity, cloudColor, brushSize, cloudsEnabled]);
+  }, [cloudHeight, cloudOpacity, cloudColor, brushSize, brushIntensity, cloudsEnabled]);
 
   // Implement Clouds
   useEffect(() => {
@@ -3938,7 +4028,7 @@ const Map: React.FC<MapProps> = ({
       // Gradually transition to black space with stars as zoom decreases below 9
       if (map.current.isStyleLoaded() && map.current.getLayer('sky')) {
         try {
-          const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [95, 179, 255];
+          const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [56, 91, 173];
           
           if (currentZoom < 9) {
             // Calculate transition progress (0 at zoom 9, 1 at zoom 0)
@@ -3952,7 +4042,7 @@ const Map: React.FC<MapProps> = ({
             
             // Gradually increase sun intensity as we zoom out
             const intensityMultiplier = 1.5 + (transitionProgress * 1.0); // 1.5x at zoom 9, 2.5x at zoom 0
-            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity * intensityMultiplier, 1.5));
+            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity * intensityMultiplier, 4));
             map.current.setPaintProperty('sky', 'sky-atmosphere-color', atmosphereColor);
             
             // Gradually transition background from normal to black space
@@ -3985,7 +4075,7 @@ const Map: React.FC<MapProps> = ({
           } else {
             if (!map.current) return;
             // Normal view (zoom >= 9) - use standard sky settings
-            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity, 1.5));
+            map.current.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', Math.max(sunIntensity, 4));
             // Remove stars and reset fog when zoomed in
             try {
               (map.current.setFog as any)(null);
@@ -4190,15 +4280,17 @@ const Map: React.FC<MapProps> = ({
           
           // Add sky based on skyLayerType first, then skyType
           if (shouldForceSpaceView || skyLayerType === 'atmosphere') {
-            // Use atmosphere sky type - enhanced for visible Earth atmosphere
+            // Use atmosphere sky type – halo with opacity for soft, natural sun glow
+            const haloRgb = haloColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [255, 251, 240];
+            const haloColorRgba = `rgba(${haloRgb[0]}, ${haloRgb[1]}, ${haloRgb[2]}, ${haloOpacity})`;
             mapInstance.addLayer({
               'id': 'sky',
               'type': 'sky',
               'paint': {
                 'sky-type': 'atmosphere',
                 'sky-atmosphere-sun': [sunAzimuth, sunElevation],
-                'sky-atmosphere-sun-intensity': Math.max(sunIntensity, 1.5), // Increased intensity for visibility
-                'sky-atmosphere-halo-color': haloColor,
+                'sky-atmosphere-sun-intensity': Math.max(sunIntensity, 4), // Bright daytime atmosphere
+                'sky-atmosphere-halo-color': haloColorRgba,
                 'sky-atmosphere-color': atmosphereColor,
                 'sky-opacity': 1.0
               } as any
@@ -4342,7 +4434,7 @@ const Map: React.FC<MapProps> = ({
         try {
           if (mapInstance.getStyle().layers) {
             // Default to space view (black with stars)
-            const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [95, 179, 255];
+            const atmosphereRgb = atmosphereColor.replace('#', '').match(/.{2}/g)?.map(x => parseInt(x, 16)) || [56, 91, 173];
             (mapInstance.setFog as any)({
               'color': '#000000', // Black space
               'high-color': '#000000', // Black space
@@ -5605,7 +5697,6 @@ const Map: React.FC<MapProps> = ({
                 <input
                   type="number"
                   min="5"
-                  max="120"
                   step="5"
                   value={sunCycleDuration}
                   onChange={(e) => setSunCycleDuration(Number(e.target.value))}
@@ -5631,9 +5722,9 @@ const Map: React.FC<MapProps> = ({
                   </label>
                   <input
                     type="range"
-                    min="0"
-                    max="3"
-                    step="0.1"
+                    min="0.5"
+                    max="15"
+                    step="0.5"
                     value={sunIntensity}
                     onChange={(e) => setSunIntensity(Number(e.target.value))}
                     style={{ flex: 1 }}
@@ -5980,93 +6071,81 @@ const Map: React.FC<MapProps> = ({
                   </div>
                   {cloudsEnabled && (
                     <>
-                      <div style={{ 
-                        padding: '8px', 
-                        background: '#e3f2fd', 
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        color: '#1565c0',
+                      <div style={{
+                        padding: '12px',
+                        background: '#2d2d2d',
+                        borderRadius: '6px',
                         marginBottom: '10px'
                       }}>
-                        <strong>Brush Mode:</strong> Click the button below to activate. A circle will follow your mouse. Click on the map to create clouds within the circle. More clicks = more clouds.
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '14px', color: '#333', display: 'block', marginBottom: '5px' }}>
-                          Brush Size: {brushSize}m
-                        </label>
-                        <input
-                          type="range"
-                          min="500"
-                          max="50000"
-                          step="100"
-                          value={brushSize}
-                          onChange={(e) => {
-                            const newSize = Number(e.target.value);
-                            setBrushSize(newSize);
-                            // Update preview circle and dots if in brush mode
-                            if (isCloudBrushMode && mousePosition && map.current) {
-                              const circle = createCirclePolygon([mousePosition.lng, mousePosition.lat], newSize);
-                              const source = map.current.getSource('cloud-brush-preview') as mapboxgl.GeoJSONSource;
-                              if (source) {
-                                source.setData({
-                                  type: 'Feature',
-                                  properties: {},
-                                  geometry: {
-                                    type: 'Polygon',
-                                    coordinates: [circle]
-                                  }
-                                });
-                              }
-                              
-                              // Update preview dots with new brush size
-                              const previewClouds: GeoJSON.Feature[] = [];
-                              const brushArea = Math.PI * Math.pow(newSize, 2);
-                              const baseCloudDensity = 0.0001;
-                              const previewCount = Math.min(20, Math.floor(brushArea * baseCloudDensity));
-                              
-                              for (let i = 0; i < previewCount; i++) {
-                                const angle = Math.random() * Math.PI * 2;
-                                const distance = Math.random() * newSize;
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                          <label style={{ fontSize: '14px', color: '#e0e0e0', minWidth: '110px' }}>Brush Diameter</label>
+                          <input
+                            type="range"
+                            min="500"
+                            max="50000"
+                            step="100"
+                            value={brushSize}
+                            onChange={(e) => {
+                              const newSize = Number(e.target.value);
+                              setBrushSize(newSize);
+                              if (isCloudBrushMode && mousePosition && map.current) {
+                                const circle = createCirclePolygon([mousePosition.lng, mousePosition.lat], newSize);
+                                const source = map.current.getSource('cloud-brush-preview') as mapboxgl.GeoJSONSource;
+                                if (source) {
+                                  source.setData({
+                                    type: 'Feature',
+                                    properties: {},
+                                    geometry: { type: 'Polygon', coordinates: [circle] }
+                                  });
+                                }
+                                const previewClouds: GeoJSON.Feature[] = [];
+                                const brushArea = Math.PI * Math.pow(newSize, 2);
+                                const baseCloudDensity = 0.0001;
+                                const previewCount = Math.min(20, Math.floor(brushArea * baseCloudDensity));
                                 const centerLat = mousePosition.lat;
-                                const radiusLat = distance / 111000;
-                                const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
-                                const cloudLat = centerLat + radiusLat * Math.sin(angle);
-                                const cloudLng = mousePosition.lng + radiusLng * Math.cos(angle);
-                                
-                                previewClouds.push({
-                                  type: 'Feature',
-                                  properties: {},
-                                  geometry: {
-                                    type: 'Point',
-                                    coordinates: [cloudLng, cloudLat]
-                                  }
-                                });
+                                for (let i = 0; i < previewCount; i++) {
+                                  const angle = Math.random() * Math.PI * 2;
+                                  const distance = Math.random() * newSize;
+                                  const radiusLat = distance / 111000;
+                                  const radiusLng = distance / (111000 * Math.cos(centerLat * Math.PI / 180));
+                                  previewClouds.push({
+                                    type: 'Feature',
+                                    properties: {},
+                                    geometry: {
+                                      type: 'Point',
+                                      coordinates: [
+                                        mousePosition.lng + radiusLng * Math.cos(angle),
+                                        centerLat + radiusLat * Math.sin(angle)
+                                      ]
+                                    }
+                                  });
+                                }
+                                const pointsSource = map.current.getSource('cloud-brush-preview-points') as mapboxgl.GeoJSONSource;
+                                if (pointsSource) {
+                                  pointsSource.setData({ type: 'FeatureCollection', features: previewClouds });
+                                }
                               }
-                              
-                              const pointsSource = map.current.getSource('cloud-brush-preview-points') as mapboxgl.GeoJSONSource;
-                              if (pointsSource) {
-                                pointsSource.setData({
-                                  type: 'FeatureCollection',
-                                  features: previewClouds
-                                });
+                              if (cloudsEnabled && brushClouds.length > 0) {
+                                if (cloudRegenDebounceRef.current) clearTimeout(cloudRegenDebounceRef.current);
+                                cloudRegenDebounceRef.current = setTimeout(() => addClouds(true), 300);
                               }
-                            }
-                            // Regenerate all existing clouds with the new brush size (debounced)
-                            if (cloudsEnabled && brushClouds.length > 0) {
-                              // Clear existing debounce timer
-                              if (cloudRegenDebounceRef.current) {
-                                clearTimeout(cloudRegenDebounceRef.current);
-                              }
-                              // Debounce regeneration by 300ms
-                              cloudRegenDebounceRef.current = setTimeout(() => {
-                                addClouds(true); // Force regenerate when brush size changes
-                              }, 300);
-                            }
-                          }}
-                          style={{ width: '100%' }}
-                        />
-                        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                          Size of the brush circle in meters. Larger = more area for clouds.
+                            }}
+                            style={{ flex: 1, accentColor: '#90caf9' }}
+                          />
+                          <span style={{ fontSize: '14px', color: '#90caf9', minWidth: '44px', textAlign: 'right' }}>{brushSize}</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <label style={{ fontSize: '14px', color: '#e0e0e0', minWidth: '110px' }}>Brush Intensity</label>
+                          <input
+                            type="range"
+                            min="0.001"
+                            max="0.1"
+                            step="0.001"
+                            value={brushIntensity}
+                            onChange={(e) => setBrushIntensity(Number(e.target.value))}
+                            style={{ flex: 1, accentColor: '#90caf9' }}
+                          />
+                          <span style={{ fontSize: '14px', color: '#90caf9', minWidth: '44px', textAlign: 'right' }}>{brushIntensity.toFixed(3)}</span>
                         </div>
                       </div>
                       <button
