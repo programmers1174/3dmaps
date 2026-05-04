@@ -6,6 +6,7 @@ import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import * as THREE from 'three';
 import Draggable from 'react-draggable';
 import FreehandMode from 'mapbox-gl-draw-freehand-mode';
+import GameLabDock from './GameLab/GameLabDock';
 
 // Type extensions for MapboxDraw
 interface MapboxDrawModes {
@@ -107,6 +108,8 @@ const Map: React.FC<MapProps> = ({
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
+  /** Stable for GameLab — inline `() => map.current` changes every render and breaks placement listeners. */
+  const getMapForGameLab = useCallback((): mapboxgl.Map | null => map.current, []);
   const [style, setStyle] = useState('mapbox://styles/mapbox/standard');
   const [showSettings, setShowSettings] = useState(false);
   const [layers3D, setLayers3D] = useState<Layer3D[]>([
@@ -115,6 +118,8 @@ const Map: React.FC<MapProps> = ({
   ]);
   const [draw, setDraw] = useState<MapboxDraw | null>(null);
   const drawRef = useRef<MapboxDraw | null>(null);
+  /** Bumps when `map.current` is assigned so GameLab can attach listeners / preview after async map init. */
+  const [gameLabMapEpoch, setGameLabMapEpoch] = useState(0);
   
   // Game area selection state
   const [isSelectingGameArea, setIsSelectingGameArea] = useState(false);
@@ -4237,6 +4242,7 @@ const Map: React.FC<MapProps> = ({
     });
 
     map.current = mapInstance;
+    setGameLabMapEpoch((n) => n + 1);
 
     // Add navigation controls (only in editor mode)
     if (!isSlideshowMode) {
@@ -4586,6 +4592,7 @@ const Map: React.FC<MapProps> = ({
 
     // Cleanup function
     return () => {
+      setGameLabMapEpoch(0);
       if (map.current) {
         map.current.remove();
         map.current = null;
@@ -4891,7 +4898,9 @@ const Map: React.FC<MapProps> = ({
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
-      
+      {!isSlideshowMode && (
+        <GameLabDock getMap={getMapForGameLab} mapEpoch={gameLabMapEpoch} gameAreaPolygon={gameAreaPolygon} />
+      )}
 
       {/* Collapsible Top Bar for Controls */}
       {!isSlideshowMode && (
@@ -4931,12 +4940,13 @@ const Map: React.FC<MapProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               color: 'white',
-              fontSize: '18px',
+              fontSize: '11px',
               fontWeight: 'bold'
             }}>
-              M
+              GL
             </div>
-            <span style={{ fontSize: '18px', fontWeight: '500', color: '#202124' }}>Map Studio</span>
+            <span style={{ fontSize: '18px', fontWeight: '500', color: '#202124' }}>GameLab</span>
+            <span style={{ fontSize: '12px', fontWeight: '400', color: '#5f6368', marginLeft: 8 }}>3D Maps</span>
           </div>
 
           {/* Center Section - Tool Icons */}
